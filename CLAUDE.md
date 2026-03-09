@@ -720,22 +720,142 @@ are complete:
 
 ---
 
+## Docker Test Environment
+
+Running the full Neutron Lab topology (11 VMs) on one machine is not feasible.
+Instead, use Docker containers to test each module incrementally before touching
+any VMs. Two files accompany this CLAUDE.md: docker-compose.yml and TESTING.md.
+
+### Container IP map
+
+| IP           | Hostname         | Service       | Credentials          | Tests                        |
+|--------------|------------------|---------------|----------------------|------------------------------|
+| 172.28.0.10  | ssh-target       | SSH :22       | root / password123   | ssh.py, postex.py Linux      |
+| 172.28.0.11  | mysql-target     | MySQL :3306   | root / (empty)       | database.py MySQL path       |
+| 172.28.0.12  | redis-target     | Redis :6379   | no auth              | database.py Redis path       |
+| 172.28.0.13  | ftp-target       | FTP :21       | anonymous            | enrichment NSE, ftp path     |
+| 172.28.0.14  | snmp-target      | SNMP :161 UDP | community: public    | enrichment SNMP path         |
+| 172.28.0.21  | dvwa-target      | HTTP :80      | admin / password     | web.py DVWA SQLi path        |
+| 172.28.0.31  | wordpress-target | HTTP :80      | admin / password     | web.py WordPress creds path  |
+| 172.28.0.40  | ldap-target      | LDAP :389     | anonymous bind       | ad_enum.py LDAP path         |
+
+### Start the test environment
+
+```bash
+# Place docker-compose.yml, wp_setup.sh, and ldap_seed/users.ldif
+# in a directory called autopwn-test/, then:
+
+cd autopwn-test
+docker compose up -d
+
+# WordPress needs one-time browser setup:
+# Go to http://localhost:8080/setup.php -> click "Create / Reset Database"
+
+# Then configure weak WordPress credentials:
+./wp_setup.sh
+```
+
+### What Docker cannot test - requires VMs
+
+| Module / Path       | Why                                    | VM needed              |
+|---------------------|----------------------------------------|------------------------|
+| exploits/smb.py     | MS17-010 needs unpatched Windows       | Windows 7 or 2008 VM   |
+| exploits/winrm.py   | WinRM is Windows-only                  | Windows 10 VM          |
+| ad_enum.py Kerberos | Real Kerberos needs actual AD          | Neutron Lab AD host    |
+| postex.py Windows   | Windows commands need Windows shell    | Any Windows VM         |
+
+Strategy: finish and verify all Docker modules first. Then spin up only
+those two VMs. Do not start VMs until the Docker tests pass.
+
+### Testing individual modules against Docker containers
+
+```bash
+# Test ad_enum.py against LDAP container
+python3 -c "
+import json, pathlib
+data = {'hosts': [{'ip': '172.28.0.40', 'hostname': 'ldap-target',
+    'os_guess': 'Linux', 'ports': [
+        {'port': 389, 'protocol': 'tcp', 'state': 'open',
+         'service': 'ldap', 'version': '', 'nse_results': {}}],
+    'flags': {'is_domain_controller': True, 'has_wordpress': False,
+              'has_dvwa': False, 'ms17_010_vulnerable': False}}]}
+pathlib.Path('state').mkdir(exist_ok=True)
+pathlib.Path('state/services.json').write_text(json.dumps(data, indent=2))
+"
+python3 modules/ad_enum.py
+
+# Test SSH exploit
+python3 -c "
+from modules.exploits.ssh import exploit_ssh
+print(exploit_ssh('172.28.0.10'))
+"
+
+# Test MySQL exploit
+python3 -c "
+from modules.exploits.database import exploit_mysql
+print(exploit_mysql('172.28.0.11'))
+"
+
+# Test Redis exploit
+python3 -c "
+from modules.exploits.database import exploit_redis
+print(exploit_redis('172.28.0.12'))
+"
+
+# Test DVWA exploit
+python3 -c "
+from modules.exploits.web import exploit_dvwa
+print(exploit_dvwa('172.28.0.21'))
+"
+
+# Test WordPress exploit
+python3 -c "
+from modules.exploits.web import exploit_wordpress
+print(exploit_wordpress('172.28.0.31'))
+"
+```
+
+### Recommended test order
+
+1. Redis - instant, no setup, stateless
+2. MySQL - instant, no setup, stateless
+3. SSH - fast, single container
+4. DVWA - requires browser setup first
+5. WordPress - requires wp_setup.sh first
+6. LDAP / ad_enum.py - most complex, test last
+
+---
+
 ## First Steps in Claude Code
 
 1. Create the directory structure:
    ```bash
    mkdir -p autopwn/modules/exploits autopwn/wordlists autopwn/templates autopwn/state autopwn/output
+   mkdir -p autopwn-test/ldap_seed
    ```
 
-2. Install missing libraries:
+2. Install missing Python libraries:
    ```bash
    pip3 install python-nmap pymysql jinja2 pywinrm --break-system-packages
    ```
 
-3. Save the sample services.json above to autopwn/state/services.json
+3. Install Docker (if not already installed):
+   ```bash
+   sudo apt update && sudo apt install -y docker.io docker-compose-plugin
+   sudo systemctl start docker
+   sudo usermod -aG docker $USER   # then log out and back in
+   ```
 
-4. Start building ad_enum.py and test it against the sample state file
+4. Start the Docker test environment:
+   ```bash
+   cd autopwn-test && docker compose up -d
+   ```
 
-5. Build exploit modules one at a time, test each independently
+5. Save the sample services.json from this file to autopwn/state/services.json
 
-6. Wire everything together in autopwn.py last
+6. Build and test modules one at a time against Docker containers
+   using the test commands in the Docker section above
+
+7. Wire everything together in autopwn.py last
+
+8. Only spin up VMs after all Docker-testable modules pass
