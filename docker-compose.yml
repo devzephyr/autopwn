@@ -1,0 +1,198 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RIS602 Autopwn - Incremental Test Environment
+#
+# Usage:
+#   docker compose up -d              # start all targets
+#   docker compose up -d dvwa mysql   # start specific targets only
+#   docker compose down               # stop and remove containers
+#   docker compose down -v            # also wipe volumes
+#
+# Attack from your Kali host:
+#   python3 autopwn.py --target 172.28.0.0/24
+#
+# Network: all containers on 172.28.0.0/24
+# Your Kali will reach them via the docker bridge (no VMs needed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  autopwn_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+services:
+
+  # ── SSH TARGET ──────────────────────────────────────────────────────────────
+  # Tests: discovery, enrichment (port 22), exploits/ssh.py, postex.py (Linux)
+  # Weak password: root / password123
+  ssh_target:
+    image: rastasheep/ubuntu-sshd:18.04
+    container_name: autopwn_ssh
+    hostname: ssh-target
+    networks:
+      autopwn_net:
+        ipv4_address: 172.28.0.10
+    ports:
+      - "2222:22"        # exposed so you can manually verify with: ssh root@localhost -p 2222
+    # Default image has root:root - we override to a weak but non-trivial password
+    command: >
+      bash -c "echo 'root:password123' | chpasswd && /usr/sbin/sshd -D"
+    restart: unless-stopped
+
+  # ── MYSQL TARGET ────────────────────────────────────────────────────────────
+  # Tests: enrichment (port 3306), exploits/database.py MySQL path
+  # Root password intentionally empty to simulate CMM Level 1 misconfiguration
+  mysql_target:
+    image: mysql:5.7
+    container_name: autopwn_mysql
+    hostname: mysql-target
+    networks:
+      autopwn_net:
+        ipv4_address: 172.28.0.11
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_ROOT_PASSWORD: ""
+    command: --bind-address=0.0.0.0
+    restart: unless-stopped
+
+  # ── REDIS TARGET ─────────────────────────────────────────────────────────────
+  # Tests: enrichment (port 6379), exploits/database.py Redis path
+  # No auth configured - simulates Redis bound to 0.0.0.0 with no requirepass
+  redis_target:
+    image: redis:7-alpine
+    container_name: autopwn_redis
+    hostname: redis-target
+    networks:
+      autopwn_net:
+        ipv4_address: 172.28.0.12
+    command: redis-server --bind 0.0.0.0 --protected-mode no
+    restart: unless-stopped
+
+  # ── DVWA TARGET ──────────────────────────────────────────────────────────────
+  # Tests: enrichment (port 80), exploits/web.py DVWA SQLi path
+  # Login: admin / password (DVWA default)
+  dvwa_db:
+    image: mysql:5.7
+    container_name: autopwn_dvwa_db
+    hostname: dvwa-db
+    networks:
+      autopwn_net:
+        ipv4_address: 172.28.0.20
+    environment:
+      MYSQL_ROOT_PASSWORD: dvwa
+      MYSQL_DATABASE: dvwa
+      MYSQL_USER: dvwa
+      MYSQL_PASSWORD: p@ssw0rd
+    restart: unless-stopped
+
+  dvwa_target:
+    image: vulnerables/web-dvwa
+    container_name: autopwn_dvwa
+    hostname: dvwa-target
+    networks:
+      autopwn_net:
+        ipv4_address: 172.28.0.21
+    ports:
+      - "8080:80"        # verify manually: http://localhost:8080
+    depends_on:
+      - dvwa_db
+    restart: unless-stopped
+
+  # ── WORDPRESS TARGET ─────────────────────────────────────────────────────────
+  # Tests: enrichment (port 80), exploits/web.py WordPress credential path
+  # Login: admin / password (intentionally weak)
+  wp_db:
+    image: mysql:5.7
+    container_name: autopwn_wp_db
+    hostname: wp-db
+    networks:
+      autopwn_net:
+        ipv4_address: 172.28.0.30
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wpuser
+      MYSQL_PASSWORD: wppass
+    restart: unless-stopped
+
+  wordpress_target:
+    image: wordpress:6.4-apache
+    container_name: autopwn_wordpress
+    hostname: wordpress-target
+    networks:
+      autopwn_net:
+        ipv4_address: 172.28.0.31
+    ports:
+      - "8081:80"        # verify manually: http://localhost:8081
+    depends_on:
+      - wp_db
+    environment:
+      WORDPRESS_DB_HOST: 172.28.0.30
+      WORDPRESS_DB_USER: wpuser
+      WORDPRESS_DB_PASSWORD: wppass
+      WORDPRESS_DB_NAME: wordpress
+    restart: unless-stopped
+
+  # ── FTP TARGET ───────────────────────────────────────────────────────────────
+  # Tests: enrichment (port 21), exploits/ftp anonymous access
+  # Anonymous FTP access enabled
+  ftp_target:
+    image: fauria/vsftpd
+    container_name: autopwn_ftp
+    hostname: ftp-target
+    networks:
+      autopwn_net:
+        ipv4_address: 172.28.0.13
+    environment:
+      ANONYMOUS_ENABLE: "YES"
+      LOCAL_ENABLE: "YES"
+      WRITE_ENABLE: "YES"
+      ANON_UPLOAD_ENABLE: "YES"
+      FTP_USER: ftpuser
+      FTP_PASS: ftppass123
+      PASV_MIN_PORT: 21100
+      PASV_MAX_PORT: 21110
+      PASV_ADDRESS: 172.28.0.13
+    ports:
+      - "21:21"
+      - "21100-21110:21100-21110"
+    restart: unless-stopped
+
+  # ── LDAP TARGET (Simulates AD for LDAP anonymous bind testing) ─────────────
+  # Tests: ad_enum.py LDAP anonymous bind and user enumeration path
+  # NOTE: This is OpenLDAP not real AD. Kerberoasting will NOT work here.
+  #       Use the Neutron Lab AD for Kerberoasting tests.
+  ldap_target:
+    image: osixia/openldap:1.5.0
+    container_name: autopwn_ldap
+    hostname: ldap-target
+    networks:
+      autopwn_net:
+        ipv4_address: 172.28.0.40
+    environment:
+      LDAP_ORGANISATION: "Neutron Corp"
+      LDAP_DOMAIN: "neutron.local"
+      LDAP_ADMIN_PASSWORD: "adminpass"
+      LDAP_READONLY_USER: "true"
+      LDAP_READONLY_USER_USERNAME: "readonly"
+      LDAP_READONLY_USER_PASSWORD: "readonly"
+      # Allow anonymous bind for testing
+      LDAP_REMOVE_CONFIG_AFTER_SETUP: "true"
+    volumes:
+      - ./ldap_seed:/container/service/slapd/assets/config/bootstrap/ldif/custom
+    restart: unless-stopped
+
+  # ── SNMP TARGET ──────────────────────────────────────────────────────────────
+  # Tests: enrichment (port 161 UDP), SNMP default community string
+  snmp_target:
+    image: polinux/snmpd
+    container_name: autopwn_snmp
+    hostname: snmp-target
+    networks:
+      autopwn_net:
+        ipv4_address: 172.28.0.14
+    # Default community string is "public"
+    restart: unless-stopped

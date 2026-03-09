@@ -1,0 +1,60 @@
+# ldap_seed/users.ldif
+# Seed file for OpenLDAP container
+# Simulates a simple AD-like user structure for testing LDAP enumeration
+# Place this file in ./ldap_seed/ next to docker-compose.yml
+
+dn: ou=users,dc=neutron,dc=local
+objectClass: organizationalUnit
+ou: users
+
+dn: cn=John Smith,ou=users,dc=neutron,dc=local
+objectClass: inetOrgPerson
+objectClass: posixAccount
+cn: John Smith
+sn: Smith
+givenName: John
+uid: jsmith
+uidNumber: 1001
+gidNumber: 1001
+homeDirectory: /home/jsmith
+mail: jsmith@neutron.local
+userPassword: Password123
+
+dn: cn=Administrator,ou=users,dc=neutron,dc=local
+objectClass: inetOrgPerson
+objectClass: posixAccount
+cn: Administrator
+sn: Administrator
+givenName: Admin
+uid: administrator
+uidNumber: 500
+gidNumber: 500
+homeDirectory: /home/administrator
+mail: admin@neutron.local
+userPassword: Admin123!
+
+dn: cn=svc_backup,ou=users,dc=neutron,dc=local
+objectClass: inetOrgPerson
+objectClass: posixAccount
+cn: svc_backup
+sn: backup
+givenName: svc
+uid: svc_backup
+uidNumber: 1100
+gidNumber: 1100
+homeDirectory: /home/svc_backup
+mail: svc_backup@neutron.local
+userPassword: Backup2024!
+
+dn: cn=svc_web,ou=users,dc=neutron,dc=local
+objectClass: inetOrgPerson
+objectClass: posixAccount
+cn: svc_web
+sn: web
+givenName: svc
+uid: svc_web
+uidNumber: 1101
+gidNumber: 1101
+homeDirectory: /home/svc_web
+mail: svc_web@neutron.local
+userPassword: WebService1
