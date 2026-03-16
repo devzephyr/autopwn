@@ -76,6 +76,7 @@ STATE_FILES = {
     "lateral":      STATE_DIR / "lateral.json",
     "postex":       STATE_DIR / "postex.json",
     "timeline":     STATE_DIR / "timeline.json",
+    "report":       OUTPUT_DIR / "report_latest.html",
 }
 
 # ---------------------------------------------------------------------------
