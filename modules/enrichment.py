@@ -156,6 +156,23 @@ def _set_flags(
         if "dvwa" in http_title or "/dvwa/" in http_enum:
             has_dvwa = True
 
+    # has_nextcloud: http-title contains "nextcloud" OR http-enum finds
+    # /nextcloud/ or /index.php/login with nextcloud markers
+    has_nextcloud = False
+    for port_num in (80, 443):
+        scripts = nse_all.get(port_num, {})
+        http_title = scripts.get("http-title", "").lower()
+        http_enum  = scripts.get("http-enum",  "").lower()
+        http_hdr   = scripts.get("http-headers", "").lower()
+        if (
+            "nextcloud" in http_title
+            or "nextcloud" in http_enum
+            or "/nextcloud" in http_enum
+            or "oc-requestid" in http_hdr   # Nextcloud response header
+            or "x-nextcloud" in http_hdr
+        ):
+            has_nextcloud = True
+
     # ms17_010_vulnerable: smb-vuln-ms17-010 output contains "VULNERABLE"
     ms17 = False
     smb_scripts = nse_all.get(445, {})
@@ -200,6 +217,7 @@ def _set_flags(
         "is_domain_controller":  is_dc,
         "has_wordpress":         has_wp,
         "has_dvwa":              has_dvwa,
+        "has_nextcloud":         has_nextcloud,
         "ms17_010_vulnerable":   ms17,
         "has_mssql":             has_mssql,
         "has_rdp":               has_rdp,
@@ -365,6 +383,7 @@ def run() -> list[dict]:
                     "has_rdp":               False,
                     "has_nfs":               False,
                     "has_smb_shares":        False,
+                    "has_nextcloud":         False,
                     "bluekeep_vulnerable":   False,
                     "mssql_empty_password":  False,
                     "nfs_world_readable":    False,

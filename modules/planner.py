@@ -107,6 +107,14 @@ SCORING_RULES: dict[str, list[tuple[str, int]]] = {
         ("smb_guest_access", 2),
         ("os_windows",       1),
     ],
+    "nextcloud_creds": [
+        ("port_80_443_open",        1),
+        ("nextcloud_fingerprint",   3),
+    ],
+    "nextcloud_enum": [
+        ("port_80_443_open",        1),
+        ("nextcloud_fingerprint",   2),
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -126,6 +134,8 @@ SEVERITY: dict[str, str] = {
     "rdp_creds":        "High",
     "nfs_unauth":       "High",
     "smb_shares":       "High",
+    "nextcloud_creds":  "High",
+    "nextcloud_enum":   "Medium",
     "ssh_brute":        "Medium",
     "smb_null":         "Medium",
     "ftp_anon":         "Medium",
@@ -316,6 +326,14 @@ def _cond_nfs_world_readable_nse(host, ports, nse):
     nfs_mount = nse.get("nfs-showmount", "")
     return "*" in nfs_mount
 
+def _cond_nextcloud_fingerprint(host, ports, nse):
+    if host.get("flags", {}).get("has_nextcloud"):
+        return True
+    for val in nse.values():
+        if "nextcloud" in val.lower():
+            return True
+    return False
+
 
 # Map condition name -> evaluator function
 CONDITION_EVALUATORS: dict[str, callable] = {
@@ -348,6 +366,7 @@ CONDITION_EVALUATORS: dict[str, callable] = {
     "mssql_empty_password_nse":  _cond_mssql_empty_password_nse,
     "bluekeep_vulnerable":       _cond_bluekeep_vulnerable,
     "nfs_world_readable_nse":    _cond_nfs_world_readable_nse,
+    "nextcloud_fingerprint":     _cond_nextcloud_fingerprint,
 }
 
 # ---------------------------------------------------------------------------
