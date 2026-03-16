@@ -31,15 +31,17 @@ set -euo pipefail
 # Configuration — adjust to match your Vagrantfile
 # ---------------------------------------------------------------------------
 VAGRANTFILE_DIR="$(cd "$(dirname "$0")" && pwd)"   # same dir as this script
-MIN_RAM_GB=20          # minimum host RAM required (GB)
-MIN_DISK_GB=60         # minimum free disk space required (GB) — boxes are large
+MIN_RAM_GB=24          # minimum host RAM required (GB) — new topology needs ~18 GB
+MIN_DISK_GB=80         # minimum free disk space required (GB) — 11 VMs, boxes are large
 MIN_VBOX_MAJOR=6       # minimum VirtualBox major version
 
 # Boxes used in the Vagrantfile: "org/name" "pinned-version"
 # Leave version blank ("") to just check the box exists.
 declare -A BOXES=(
     ["gusztavvargadr/windows-server-2022-standard-core"]="2309.0.2402"
+    ["gusztavvargadr/windows-10"]=""
     ["gusztavvargadr/ubuntu-server-2204"]=""
+    ["nicholaswilde/pfsense"]=""
     ["kalilinux/rolling"]=""
 )
 
@@ -245,7 +247,7 @@ fi
 if (( total_ram_gb >= MIN_RAM_GB )); then
     _ok "Host RAM: ${total_ram_gb}GB (need ${MIN_RAM_GB}GB minimum)"
 else
-    _fail "Host RAM: ${total_ram_gb}GB — need at least ${MIN_RAM_GB}GB (VMs require ~16.5GB)"
+    _fail "Host RAM: ${total_ram_gb}GB — need at least ${MIN_RAM_GB}GB (11 VMs require ~18GB)"
 fi
 
 # ---------------------------------------------------------------------------
