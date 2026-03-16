@@ -36,14 +36,16 @@ PORT_SCRIPTS: dict[int, str] = {
     22:   "ssh-auth-methods",
     80:   "http-title,http-enum,http-wordpress-enum,http-headers",
     88:   "krb5-enum-users",
+    161:  "snmp-info",
     389:  "ldap-rootdse",
     443:  "http-title,http-enum,http-wordpress-enum,ssl-cert",
     445:  "smb-vuln-ms17-010,smb-os-discovery,smb-security-mode",
-    1433: "ms-sql-info,ms-sql-empty-password",
+    1433: "ms-sql-info,ms-sql-empty-password,ms-sql-config,ms-sql-xp-cmdshell",
+    2049: "nfs-ls,nfs-showmount,nfs-statfs",
     3306: "mysql-empty-password,mysql-info",
+    3389: "rdp-enum-encryption,rdp-vuln-ms12-020",
     5985: "http-auth-finder",
     6379: "redis-info",
-    161:  "snmp-info",
 }
 
 # All ports we care about (used for fast pre-scan port list)
@@ -108,15 +110,27 @@ def _extract_os_guess(nm: nmap.PortScanner, host: str) -> str:
     return ""
 
 
-def _set_flags(ports: list[dict], nse_all: dict[int, dict[str, str]]) -> dict[str, bool]:
+def _set_flags(
+    ports: list[dict],
+    nse_all: dict[int, dict[str, str]],
+    os_guess: str = "",
+) -> dict[str, bool]:
     """
     Derive application-level flags from the enriched port list.
 
     Args:
-        ports: list of port dicts already built for this host.
-        nse_all: {port_number: {script_name: output}} for all ports.
+        ports:    list of port dicts already built for this host.
+        nse_all:  {port_number: {script_name: output}} for all ports.
+        os_guess: best OS guess string from nmap OS detection.
     """
-    open_port_nums = {p["port"] for p in ports if p["state"] == "open"}
+    open_ports = [p for p in ports if p["state"] == "open"]
+    open_port_nums = {p["port"] for p in open_ports}
+
+    # Flat merged NSE dict for cross-port lookups
+    all_nse: dict[str, str] = {}
+    for port_scripts in nse_all.values():
+        for k, v in port_scripts.items():
+            all_nse[k] = str(v)
 
     # is_domain_controller: ports 88 AND 389 both open
     is_dc = (88 in open_port_nums) and (389 in open_port_nums)
@@ -149,11 +163,51 @@ def _set_flags(ports: list[dict], nse_all: dict[int, dict[str, str]]) -> dict[st
     if "VULNERABLE" in vuln_output and "NOT VULNERABLE" not in vuln_output:
         ms17 = True
 
+    # has_mssql: port 1433 open
+    has_mssql = any(p["port"] == 1433 for p in open_ports)
+
+    # has_rdp: port 3389 open
+    has_rdp = any(p["port"] == 3389 for p in open_ports)
+
+    # has_nfs: port 2049 open
+    has_nfs = any(p["port"] == 2049 for p in open_ports)
+
+    # has_smb_shares: 445 open and SMB guest/null access indicated
+    smb_mode = all_nse.get("smb-security-mode", "").lower()
+    has_smb_shares = (
+        445 in open_port_nums
+        and ("account_used: guest" in smb_mode or "guest" in smb_mode)
+    )
+
+    # bluekeep_vulnerable: RDP open on a pre-Windows-10 / pre-2012 OS
+    _os_lower = os_guess.lower()
+    bluekeep_vulnerable = has_rdp and any(
+        kw in _os_lower for kw in ("windows 7", "2008", "xp", "2003")
+    )
+
+    # mssql_empty_password: ms-sql-empty-password NSE mentions "sa"
+    mssql_ep_output = all_nse.get("ms-sql-empty-password", "")
+    mssql_empty_password = "sa" in mssql_ep_output.lower() or "empty" in mssql_ep_output.lower()
+
+    # nfs_world_readable: nfs-showmount or nfs-ls output contains "*" or "everyone"
+    nfs_world_readable = any(
+        "*" in str(v) or "everyone" in str(v).lower()
+        for k, v in all_nse.items()
+        if "nfs" in k.lower()
+    )
+
     return {
-        "is_domain_controller": is_dc,
-        "has_wordpress": has_wp,
-        "has_dvwa": has_dvwa,
-        "ms17_010_vulnerable": ms17,
+        "is_domain_controller":  is_dc,
+        "has_wordpress":         has_wp,
+        "has_dvwa":              has_dvwa,
+        "ms17_010_vulnerable":   ms17,
+        "has_mssql":             has_mssql,
+        "has_rdp":               has_rdp,
+        "has_nfs":               has_nfs,
+        "has_smb_shares":        has_smb_shares,
+        "bluekeep_vulnerable":   bluekeep_vulnerable,
+        "mssql_empty_password":  mssql_empty_password,
+        "nfs_world_readable":    nfs_world_readable,
     }
 
 
@@ -253,7 +307,7 @@ def _enrich_host(host_record: dict) -> dict:
     # Sort ports for deterministic output
     enriched_ports.sort(key=lambda p: p["port"])
 
-    flags = _set_flags(enriched_ports, nse_by_port)
+    flags = _set_flags(enriched_ports, nse_by_port, os_guess)
     flag_summary = [k for k, v in flags.items() if v]
     if flag_summary:
         print(f"    [Flags] {', '.join(flag_summary)}")
@@ -303,10 +357,17 @@ def run() -> list[dict]:
                 "os_guess": "",
                 "ports": [],
                 "flags": {
-                    "is_domain_controller": False,
-                    "has_wordpress": False,
-                    "has_dvwa": False,
-                    "ms17_010_vulnerable": False,
+                    "is_domain_controller":  False,
+                    "has_wordpress":         False,
+                    "has_dvwa":              False,
+                    "ms17_010_vulnerable":   False,
+                    "has_mssql":             False,
+                    "has_rdp":               False,
+                    "has_nfs":               False,
+                    "has_smb_shares":        False,
+                    "bluekeep_vulnerable":   False,
+                    "mssql_empty_password":  False,
+                    "nfs_world_readable":    False,
                 },
             })
 
