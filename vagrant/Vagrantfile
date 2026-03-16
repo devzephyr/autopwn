@@ -17,6 +17,13 @@
 #   initialised before member machines run their provisioners.  All other VMs
 #   start in parallel after dc01 completes.
 #
+# DC two-pass provisioning
+#   vagrant up          — runs Pass 1 (AD DS install + reboot).  The VM will
+#                         reboot at the end; vagrant may report a timeout — OK.
+#   vagrant provision dc01 --provision-with dc01-pass2
+#                       — run once the DC has finished rebooting (~3-5 min).
+#                         Configures DNS records, lab users, ADCS PKI, IIS.
+#
 # Synced folders are disabled on every VM for performance.
 # =============================================================================
 
@@ -159,13 +166,38 @@ Vagrant.configure("2") do |config|
       ip:                 DC01_IP,
       virtualbox__intnet: NET_VLAN10
 
-    # PowerShell provisioner — AD DS install, DNS config, user creation.
+    # --------------------------------------------------------------------------
+    # Pass 1 — static IP + AD DS install + forest promotion.
+    # dc01.ps1 ends Pass 1 with Restart-Computer, which disconnects Vagrant.
+    # Vagrant will report a connection timeout; this is expected.
+    # After vagrant up completes (or times out), run:
+    #   vagrant provision dc01
+    # to execute Pass 2 once the DC has finished rebooting.
+    # --------------------------------------------------------------------------
     dc.vm.provision "shell",
+      name:       "dc01-pass1",
       path:       "provision/dc01.ps1",
       privileged: true,
       env: {
-        "DC_IP"     => DC01_IP,
-        "VLAN10_GW" => PFSENSE_VLAN10,
+        "PROVISION_PASS" => "1",
+        "DC_IP"          => DC01_IP,
+        "VLAN10_GW"      => PFSENSE_VLAN10,
+      }
+
+    # --------------------------------------------------------------------------
+    # Pass 2 — post-reboot: DNS records, user accounts, ADCS PKI, IIS cert page.
+    # run: "never" prevents this from firing on the initial vagrant up.
+    # Invoke explicitly with: vagrant provision dc01 --provision-with dc01-pass2
+    # --------------------------------------------------------------------------
+    dc.vm.provision "shell",
+      name:       "dc01-pass2",
+      run:        "never",
+      path:       "provision/dc01.ps1",
+      privileged: true,
+      env: {
+        "PROVISION_PASS" => "2",
+        "DC_IP"          => DC01_IP,
+        "VLAN10_GW"      => PFSENSE_VLAN10,
       }
   end
 
