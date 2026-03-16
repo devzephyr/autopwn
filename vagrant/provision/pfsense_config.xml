@@ -1,0 +1,336 @@
+<?xml version="1.0"?>
+<!--
+  pfSense configuration for the Neutron Enterprise Lab (RIS602 / SPR500)
+  Generated for use with the nicholaswilde/pfsense Vagrant box.
+
+  Interface mapping (VirtualBox adapter -> pfSense vtnet -> role)
+    vtnet0   WAN    NAT adapter added automatically by Vagrant, outbound only
+    vtnet1   LAN    host-only / mgmt    172.16.99.1/24
+    vtnet2   OPT1   neutron-vlan10      172.16.10.1/24  DC segment
+    vtnet3   OPT2   neutron-vlan20      172.16.20.1/24  web/server segment
+    vtnet4   OPT3   neutron-vlan30      172.16.30.1/24  attacker segment
+
+  Firewall policy (top-to-bottom, first match wins)
+    vlan30 to vlan10 tcp/445    BLOCK  no direct SMB from attacker to DC
+    vlan30 to vlan10 tcp/88     ALLOW  Kerberos (AS-REP roasting / TGT)
+    vlan30 to vlan10 tcp/389    ALLOW  LDAP enumeration
+    vlan30 to vlan10 tcp/636    ALLOW  LDAPS enumeration
+    vlan30 to vlan20 any        ALLOW  attacker reaches all web/server services
+    vlan20 to vlan10 any        ALLOW  web servers authenticate to AD
+    any    to WAN   any         ALLOW  outbound internet via NAT
+
+  DHCP disabled on all interfaces. Static IPs set by shell provisioners.
+  DNS forwarder forwards neutron.local queries to dc01 at 172.16.10.10.
+-->
+<pfsense>
+
+  <version>22.7</version>
+  <lastchange/>
+
+  <!-- System / global settings -->
+  <system>
+    <hostname>pfsense</hostname>
+    <domain>neutron.local</domain>
+    <dnsserver>172.16.10.10</dnsserver>
+    <dnsserver>8.8.8.8</dnsserver>
+    <dnslocalhost>false</dnslocalhost>
+    <timezone>America/Toronto</timezone>
+    <timeservers>0.pfsense.pool.ntp.org</timeservers>
+    <webgui>
+      <protocol>https</protocol>
+      <port>443</port>
+      <max_procs>2</max_procs>
+    </webgui>
+    <disablenatreflection>yes</disablenatreflection>
+    <optimization>normal</optimization>
+    <maximumtableentries>400000</maximumtableentries>
+  </system>
+
+  <!-- Interfaces -->
+  <interfaces>
+
+    <!-- WAN: vtnet0, NAT DHCP from VirtualBox -->
+    <wan>
+      <enable/>
+      <if>vtnet0</if>
+      <descr>WAN</descr>
+      <ipaddr>dhcp</ipaddr>
+      <ipaddrv6>dhcp6</ipaddrv6>
+      <blockpriv>1</blockpriv>
+      <blockbogons>1</blockbogons>
+    </wan>
+
+    <!-- LAN: vtnet1, mgmt host-only, 172.16.99.1/24 -->
+    <lan>
+      <enable/>
+      <if>vtnet1</if>
+      <descr>LAN</descr>
+      <ipaddr>172.16.99.1</ipaddr>
+      <subnet>24</subnet>
+    </lan>
+
+    <!-- OPT1: vtnet2, vlan10 DC segment, 172.16.10.1/24 -->
+    <opt1>
+      <enable/>
+      <if>vtnet2</if>
+      <descr>VLAN10_DC</descr>
+      <ipaddr>172.16.10.1</ipaddr>
+      <subnet>24</subnet>
+    </opt1>
+
+    <!-- OPT2: vtnet3, vlan20 web/server segment, 172.16.20.1/24 -->
+    <opt2>
+      <enable/>
+      <if>vtnet3</if>
+      <descr>VLAN20_WEB</descr>
+      <ipaddr>172.16.20.1</ipaddr>
+      <subnet>24</subnet>
+    </opt2>
+
+    <!-- OPT3: vtnet4, vlan30 attacker segment, 172.16.30.1/24 -->
+    <opt3>
+      <enable/>
+      <if>vtnet4</if>
+      <descr>VLAN30_ATK</descr>
+      <ipaddr>172.16.30.1</ipaddr>
+      <subnet>24</subnet>
+    </opt3>
+
+  </interfaces>
+
+  <!-- DHCP server: disabled on all interfaces (static IPs via provisioners) -->
+  <dhcpd>
+    <lan/>
+    <opt1/>
+    <opt2/>
+    <opt3/>
+  </dhcpd>
+
+  <!-- DNS forwarder: resolves neutron.local via dc01, everything else via 8.8.8.8 -->
+  <dnsmasq>
+    <enable/>
+    <regdhcpstatic/>
+    <domainoverrides>
+      <domainoverride>
+        <domain>neutron.local</domain>
+        <ip>172.16.10.10</ip>
+        <descr>DC01 authoritative DNS for neutron.local</descr>
+      </domainoverride>
+    </domainoverrides>
+  </dnsmasq>
+
+  <!-- NAT: automatic outbound masquerade for all internal subnets via WAN -->
+  <nat>
+    <outbound>
+      <mode>automatic</mode>
+    </outbound>
+  </nat>
+
+  <!-- Firewall rules -->
+  <filter>
+
+    <!-- RULE 1: vlan30 to vlan10 tcp/445 BLOCK
+         No direct SMB from the attacker VLAN to the domain controller.
+         Must appear before the general ALLOW rules to take precedence. -->
+    <rule>
+      <type>block</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt3</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+        <port>445</port>
+      </destination>
+      <descr>BLOCK attacker SMB to DC vlan30 to vlan10 tcp445</descr>
+    </rule>
+
+    <!-- RULE 2: vlan30 to vlan10 tcp/88 ALLOW (Kerberos)
+         Permits AS-REP roasting and TGT requests from Kali. -->
+    <rule>
+      <type>pass</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt3</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+        <port>88</port>
+      </destination>
+      <descr>ALLOW attacker Kerberos to DC vlan30 to vlan10 tcp88</descr>
+    </rule>
+
+    <!-- RULE 3: vlan30 to vlan10 tcp/389 ALLOW (LDAP)
+         Permits anonymous bind and enumeration via ldap3. -->
+    <rule>
+      <type>pass</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt3</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+        <port>389</port>
+      </destination>
+      <descr>ALLOW attacker LDAP to DC vlan30 to vlan10 tcp389</descr>
+    </rule>
+
+    <!-- RULE 4: vlan30 to vlan10 tcp/636 ALLOW (LDAPS)
+         Permits TLS LDAP enumeration (ldap3 auto-negotiate). -->
+    <rule>
+      <type>pass</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt3</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+        <port>636</port>
+      </destination>
+      <descr>ALLOW attacker LDAPS to DC vlan30 to vlan10 tcp636</descr>
+    </rule>
+
+    <!-- RULE 5: vlan30 to vlan20 ALLOW all
+         Attacker can reach HTTP (80/443), MySQL (3306), Redis (6379),
+         SMB (445), SSH (22), FTP (21), SNMP (161) on web/server segment. -->
+    <rule>
+      <type>pass</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <network>opt3</network>
+      </source>
+      <destination>
+        <network>opt2</network>
+      </destination>
+      <descr>ALLOW attacker to web-server segment vlan30 to vlan20 all</descr>
+    </rule>
+
+    <!-- RULE 6: vlan20 to vlan10 ALLOW all
+         Web servers and DB hosts authenticate to AD (Kerberos, LDAP, DNS). -->
+    <rule>
+      <type>pass</type>
+      <interface>opt2</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <network>opt2</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+      </destination>
+      <descr>ALLOW web-server segment to DC vlan20 to vlan10 all</descr>
+    </rule>
+
+    <!-- RULE 7a: vlan10 outbound to WAN
+         Domain controller can pull Windows updates and resolve external DNS. -->
+    <rule>
+      <type>pass</type>
+      <interface>opt1</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <network>opt1</network>
+      </source>
+      <destination>
+        <any/>
+      </destination>
+      <descr>ALLOW vlan10 outbound to WAN</descr>
+    </rule>
+
+    <!-- RULE 7b: vlan20 outbound to WAN
+         Web/server hosts can pull packages (apt, pip) during provisioning. -->
+    <rule>
+      <type>pass</type>
+      <interface>opt2</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <network>opt2</network>
+      </source>
+      <destination>
+        <any/>
+      </destination>
+      <descr>ALLOW vlan20 outbound to WAN</descr>
+    </rule>
+
+    <!-- RULE 7c: vlan30 outbound to WAN
+         Kali can pull tool updates and download payload stagers. -->
+    <rule>
+      <type>pass</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <network>opt3</network>
+      </source>
+      <destination>
+        <any/>
+      </destination>
+      <descr>ALLOW vlan30 outbound to WAN</descr>
+    </rule>
+
+    <!-- RULE 8: mgmt LAN to any ALLOW
+         Vagrant host (via host-only adapter) reaches all VMs for management. -->
+    <rule>
+      <type>pass</type>
+      <interface>lan</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <network>lan</network>
+      </source>
+      <destination>
+        <any/>
+      </destination>
+      <descr>ALLOW mgmt network unrestricted access for host administration</descr>
+    </rule>
+
+  </filter>
+
+  <!-- Static routes: none required; connected routes generated from interface IPs -->
+  <staticroutes/>
+
+  <!-- Aliases: named address objects referenced by rule descriptions -->
+  <aliases>
+    <alias>
+      <name>VLAN10_DC_NET</name>
+      <type>network</type>
+      <address>172.16.10.0/24</address>
+      <descr>DC and DNS segment</descr>
+    </alias>
+    <alias>
+      <name>VLAN20_WEB_NET</name>
+      <type>network</type>
+      <address>172.16.20.0/24</address>
+      <descr>Web and server segment</descr>
+    </alias>
+    <alias>
+      <name>VLAN30_ATK_NET</name>
+      <type>network</type>
+      <address>172.16.30.0/24</address>
+      <descr>Attacker and VPN segment</descr>
+    </alias>
+    <alias>
+      <name>DC01</name>
+      <type>host</type>
+      <address>172.16.10.10</address>
+      <descr>Domain controller dc01.neutron.local</descr>
+    </alias>
+  </aliases>
+
+  <!-- Syslog: local only, no remote syslog server in this lab -->
+  <syslog>
+    <filterdescriptions>1</filterdescriptions>
+  </syslog>
+
+</pfsense>

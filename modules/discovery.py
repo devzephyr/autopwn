@@ -1,11 +1,12 @@
 """
 Stage 1: Layered host discovery.
 
-Four layers all run and results are merged/deduplicated by IP:
-  Layer 1 - ARP sweep (same-L2, cannot be filtered)
-  Layer 2 - Multi-probe TCP/UDP (works across routed VLANs)
-  Layer 3 - Reverse DNS (adds hostnames to known IPs)
-  Layer 4 - Forward DNS brute-force (catches DNS-only hosts)
+Five layers all run and results are merged/deduplicated by IP:
+  Layer 1  - ARP sweep (same-L2, cannot be filtered)
+  Layer 2  - Multi-probe TCP/UDP (works across routed VLANs)
+  Layer 3  - Reverse DNS (adds hostnames to known IPs)
+  Layer 4  - Forward DNS brute-force (catches DNS-only hosts)
+  Layer 4b - DNS Zone Transfer / AXFR (reveals all zone records)
 
 Output: state/discovery.json
 """
@@ -14,6 +15,7 @@ import json
 import os
 import pathlib
 import socket
+import subprocess
 import datetime
 
 import nmap
@@ -250,12 +252,94 @@ def _layer_forward_dns(
 
 
 # ---------------------------------------------------------------------------
+# Layer 4b: DNS Zone Transfer (AXFR)
+# ---------------------------------------------------------------------------
+
+def _dns_zone_transfer(dns_servers: list[str], discovered_hosts: dict) -> list[dict]:
+    """Attempt AXFR zone transfer against all discovered DNS servers."""
+    new_hosts: list[dict] = []
+
+    for dns_ip in dns_servers:
+        # Derive candidate zone names from hostnames already known
+        domains_to_try: set[str] = set()
+        for host in discovered_hosts.values():
+            if host.get("hostname"):
+                parts = host["hostname"].split(".")
+                if len(parts) >= 2:
+                    domains_to_try.add(".".join(parts[-2:]))   # e.g. neutron.local
+                if len(parts) >= 3:
+                    domains_to_try.add(".".join(parts[-3:]))   # e.g. corp.neutron.local
+
+        if not domains_to_try:
+            domains_to_try = {"local", "internal", "corp", "lan", "ad", "domain"}
+
+        for domain in domains_to_try:
+            try:
+                # Method 1: dnspython xfr
+                try:
+                    import dns.resolver    # type: ignore
+                    import dns.zone        # type: ignore
+                    import dns.query       # type: ignore
+                    import dns.exception   # type: ignore
+
+                    zone = dns.zone.from_xfr(dns.query.xfr(dns_ip, domain, timeout=10))
+                    for name, node in zone.nodes.items():
+                        for rdataset in node.rdatasets:
+                            for rdata in rdataset:
+                                if hasattr(rdata, "address"):
+                                    ip = rdata.address
+                                    hostname = f"{name}.{domain}".rstrip(".")
+                                    if ip not in discovered_hosts:
+                                        new_hosts.append({
+                                            "ip": ip,
+                                            "hostname": hostname,
+                                            "discovery_method": "dns_zone_transfer",
+                                        })
+                                        print(f"    [+] AXFR (dnspython): {hostname} -> {ip}")
+                except Exception:
+                    pass
+
+                # Method 2: subprocess dig AXFR fallback
+                try:
+                    result = subprocess.run(
+                        ["dig", f"@{dns_ip}", domain, "AXFR", "+nocomments", "+nocmd"],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    stdout = result.stdout
+                    if stdout and "Transfer failed" not in stdout:
+                        for line in stdout.splitlines():
+                            parts_line = line.split()
+                            if len(parts_line) >= 5 and parts_line[3] in ("A", "AAAA"):
+                                ip = parts_line[4]
+                                hostname = parts_line[0].rstrip(".")
+                                # Skip if already captured by dnspython or known
+                                already_new = any(h["ip"] == ip for h in new_hosts)
+                                if ip not in discovered_hosts and not already_new:
+                                    new_hosts.append({
+                                        "ip": ip,
+                                        "hostname": hostname,
+                                        "discovery_method": "dns_zone_transfer",
+                                    })
+                                    print(f"    [+] AXFR (dig): {hostname} -> {ip}")
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+
+    return new_hosts
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
 def run(cidr: str) -> list[dict]:
     """
-    Run all four discovery layers against *cidr*.
+    Run all discovery layers against *cidr*.
+
+    Layers: ARP, multi-probe TCP/UDP, reverse DNS, forward DNS brute-force,
+    and DNS zone transfer (AXFR).  Results are merged and deduplicated by IP.
 
     Returns a list of host dicts and writes state/discovery.json.
     """
@@ -285,6 +369,20 @@ def run(cidr: str) -> list[dict]:
     # Reverse-DNS the newly discovered hosts too
     _layer_reverse_dns(dns_new)
     hosts.update(dns_new)
+
+    # --- Layer 4b: DNS Zone Transfer (AXFR) ---
+    print(f"  [Layer 4b] DNS Zone Transfer (AXFR) against {len(dns_servers)} server(s).")
+    if dns_servers:
+        axfr_new = _dns_zone_transfer(dns_servers, hosts)
+        # Reverse-DNS any newly found hosts that lack a hostname
+        axfr_new_dict: dict[str, dict] = {h["ip"]: h for h in axfr_new}
+        _layer_reverse_dns(axfr_new_dict)
+        for ip, record in axfr_new_dict.items():
+            if ip not in hosts:
+                hosts[ip] = record
+        print(f"  [Layer 4b] AXFR added {len(axfr_new_dict)} new host(s).")
+    else:
+        print("  [Layer 4b] No DNS servers found; skipping zone transfer.")
 
     # Build final sorted host list
     host_list = sorted(hosts.values(), key=lambda h: tuple(int(o) for o in h["ip"].split(".")))

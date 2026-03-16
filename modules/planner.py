@@ -77,6 +77,70 @@ SCORING_RULES: dict[str, list[tuple[str, int]]] = {
         ("port_5985_open",        1),
         ("credentials_available", 3),
     ],
+    "mssql_default": [
+        ("port_1433_open",          1),
+        ("mssql_empty_password_nse", 3),
+    ],
+    "mssql_xp_cmdshell": [
+        ("port_1433_open",        1),
+        ("credentials_available", 2),
+        ("os_windows",            1),
+    ],
+    "rdp_bluekeep": [
+        ("port_3389_open",      1),
+        ("bluekeep_vulnerable", 3),
+    ],
+    "rdp_creds": [
+        ("port_3389_open",        1),
+        ("credentials_available", 3),
+    ],
+    "nfs_unauth": [
+        ("port_2049_open",       1),
+        ("nfs_world_readable_nse", 3),
+    ],
+    "nfs_enum": [
+        ("port_2049_open", 2),
+        ("port_111_open",  1),
+    ],
+    "smb_shares": [
+        ("port_445_open",    1),
+        ("smb_guest_access", 2),
+        ("os_windows",       1),
+    ],
+    "nextcloud_creds": [
+        ("port_80_443_open",        1),
+        ("nextcloud_fingerprint",   3),
+    ],
+    "nextcloud_enum": [
+        ("port_80_443_open",        1),
+        ("nextcloud_fingerprint",   2),
+    ],
+}
+
+# ---------------------------------------------------------------------------
+# Severity ratings for every technique (used by report.py)
+# ---------------------------------------------------------------------------
+SEVERITY: dict[str, str] = {
+    "ms17_010":         "Critical",
+    "kerberoast":       "Critical",
+    "mssql_default":    "Critical",
+    "mssql_xp_cmdshell": "Critical",
+    "rdp_bluekeep":     "Critical",
+    "dvwa_sqli":        "High",
+    "wordpress_creds":  "High",
+    "winrm_creds":      "High",
+    "mysql_default":    "High",
+    "redis_unauth":     "High",
+    "rdp_creds":        "High",
+    "nfs_unauth":       "High",
+    "smb_shares":       "High",
+    "nextcloud_creds":  "High",
+    "nextcloud_enum":   "Medium",
+    "ssh_brute":        "Medium",
+    "smb_null":         "Medium",
+    "ftp_anon":         "Medium",
+    "nfs_enum":         "Medium",
+    "snmp_default":     "Low",
 }
 
 # ---------------------------------------------------------------------------
@@ -237,6 +301,39 @@ def _cond_credentials_available(host, ports, nse):
                 return True
     return False
 
+def _cond_port_1433_open(host, ports, nse):
+    return 1433 in ports
+
+def _cond_port_3389_open(host, ports, nse):
+    return 3389 in ports
+
+def _cond_port_2049_open(host, ports, nse):
+    return 2049 in ports
+
+def _cond_port_111_open(host, ports, nse):
+    return 111 in ports
+
+def _cond_mssql_empty_password_nse(host, ports, nse):
+    val = nse.get("ms-sql-empty-password", "")
+    return "sa" in val.lower() or "empty" in val.lower()
+
+def _cond_bluekeep_vulnerable(host, ports, nse):
+    return bool(host.get("flags", {}).get("bluekeep_vulnerable"))
+
+def _cond_nfs_world_readable_nse(host, ports, nse):
+    if host.get("flags", {}).get("nfs_world_readable"):
+        return True
+    nfs_mount = nse.get("nfs-showmount", "")
+    return "*" in nfs_mount
+
+def _cond_nextcloud_fingerprint(host, ports, nse):
+    if host.get("flags", {}).get("has_nextcloud"):
+        return True
+    for val in nse.values():
+        if "nextcloud" in val.lower():
+            return True
+    return False
+
 
 # Map condition name -> evaluator function
 CONDITION_EVALUATORS: dict[str, callable] = {
@@ -262,6 +359,14 @@ CONDITION_EVALUATORS: dict[str, callable] = {
     "ftp_anon_nse":              _cond_ftp_anon_nse,
     "port_5985_open":            _cond_port_5985_open,
     "credentials_available":     _cond_credentials_available,
+    "port_1433_open":            _cond_port_1433_open,
+    "port_3389_open":            _cond_port_3389_open,
+    "port_2049_open":            _cond_port_2049_open,
+    "port_111_open":             _cond_port_111_open,
+    "mssql_empty_password_nse":  _cond_mssql_empty_password_nse,
+    "bluekeep_vulnerable":       _cond_bluekeep_vulnerable,
+    "nfs_world_readable_nse":    _cond_nfs_world_readable_nse,
+    "nextcloud_fingerprint":     _cond_nextcloud_fingerprint,
 }
 
 # ---------------------------------------------------------------------------

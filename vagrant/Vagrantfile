@@ -1,0 +1,413 @@
+# =============================================================================
+# Neutron Enterprise Lab — Vagrant topology replication
+# RIS602 Network Penetration Testing — Seneca Polytechnic
+#
+# Provider:  VirtualBox only
+# Networks:  Four isolated VirtualBox networks simulating VLANs plus one
+#            host-only management network so `vagrant ssh` continues to work.
+#
+# VLAN layout
+#   vlan10  172.16.10.0/24  — DC, DNS, network services
+#   vlan20  172.16.20.0/24  — CorpWeb, IntWeb, FileSharing, E-Site
+#   vlan30  172.16.30.0/24  — VPN server, Kali attacker
+#   mgmt    172.16.99.0/24  — pfSense management (host-only, never routed)
+#
+# Boot order
+#   dc01 starts first (Vagrant primary + order: 1) so Active Directory is
+#   initialised before member machines run their provisioners.  All other VMs
+#   start in parallel after dc01 completes.
+#
+# DC two-pass provisioning
+#   vagrant up          — runs Pass 1 (AD DS install + reboot).  The VM will
+#                         reboot at the end; vagrant may report a timeout — OK.
+#   vagrant provision dc01 --provision-with dc01-pass2
+#                       — run once the DC has finished rebooting (~3-5 min).
+#                         Configures DNS records, lab users, ADCS PKI, IIS.
+#
+# Synced folders are disabled on every VM for performance.
+# =============================================================================
+
+Vagrant.require_version ">= 2.3.0"
+
+# ---------------------------------------------------------------------------
+# IP address variables — every address in the file comes from here.
+# Never put a bare address literal below this block.
+# ---------------------------------------------------------------------------
+
+# pfSense gateway addresses, one per interface
+PFSENSE_MGMT   = "172.16.99.1"   # mgmt / LAN (host-only) — web-GUI access
+PFSENSE_VLAN10 = "172.16.10.1"   # OPT1 — DC segment gateway
+PFSENSE_VLAN20 = "172.16.20.1"   # OPT2 — web/server segment gateway
+PFSENSE_VLAN30 = "172.16.30.1"   # OPT3 — attacker segment gateway
+
+# VLAN 10 — domain controller / DNS
+DC01_IP = "172.16.10.10"
+
+# VLAN 20 — web and server hosts
+CORPWEB_IP     = "172.16.20.11"
+INTWEB_IP      = "172.16.20.12"
+FILESHARING_IP = "172.16.20.13"
+ESITE_IP       = "172.16.20.14"
+
+# VLAN 30 — attacker-side hosts
+VPN_IP  = "172.16.30.10"
+KALI_IP = "172.16.30.50"
+
+# VirtualBox internal network names — any two VMs sharing the same string are
+# placed on the same isolated L2 segment (no host visibility).
+NET_VLAN10 = "neutron-vlan10"
+NET_VLAN20 = "neutron-vlan20"
+NET_VLAN30 = "neutron-vlan30"
+
+# ---------------------------------------------------------------------------
+# Vagrant configuration
+# ---------------------------------------------------------------------------
+
+Vagrant.configure("2") do |config|
+
+  # Disable the default VirtualBox Guest Additions version mismatch warning
+  # globally; individual boxes may still trigger it but it is non-fatal.
+  config.vbguest.auto_update = false if Vagrant.has_plugin?("vagrant-vbguest")
+
+  # ==========================================================================
+  # pfSense — Core router / firewall
+  #
+  # Interface map (VirtualBox adapter numbers → pfSense vtnet names):
+  #   adapter 1  vtnet0  NAT      — WAN, outbound internet
+  #   adapter 2  vtnet1  host-only — LAN / mgmt (172.16.99.1)
+  #   adapter 3  vtnet2  internal  — OPT1 / vlan10 (172.16.10.1)
+  #   adapter 4  vtnet3  internal  — OPT2 / vlan20 (172.16.20.1)
+  #   adapter 5  vtnet4  internal  — OPT3 / vlan30 (172.16.30.1)
+  #
+  # The provisioner copies pfsense_config.xml into /cf/conf/config.xml and
+  # triggers a config reload; no manual console interaction is required.
+  # ==========================================================================
+  config.vm.define "pfsense" do |pf|
+    pf.vm.box      = "nicholaswilde/pfsense"
+    pf.vm.hostname = "pfsense"
+
+    # FreeBSD-based box — synced folder causes mount errors; disable it.
+    pf.vm.synced_folder ".", "/vagrant", disabled: true
+
+    pf.vm.provider "virtualbox" do |vb|
+      vb.name   = "neutron-pfsense"
+      vb.memory = 512
+      vb.cpus   = 1
+      # Allow promiscuous mode on the three internal NICs so pfSense can
+      # forward frames between VLANs without VirtualBox dropping them.
+      vb.customize ["modifyvm", :id, "--nicpromisc3", "allow-all"]  # OPT1
+      vb.customize ["modifyvm", :id, "--nicpromisc4", "allow-all"]  # OPT2
+      vb.customize ["modifyvm", :id, "--nicpromisc5", "allow-all"]  # OPT3
+    end
+
+    # --- NIC 2: mgmt / LAN — host-only, 172.16.99.1 ---
+    # This is pfSense's LAN interface.  It is host-only (not virtualbox__intnet)
+    # so the Vagrant host can reach the pfSense web GUI at https://172.16.99.1.
+    pf.vm.network "private_network",
+      ip:                 PFSENSE_MGMT,
+      virtualbox__intnet: false
+
+    # --- NIC 3: OPT1 — vlan10 (DC segment), 172.16.10.1 ---
+    # Internal network shared with dc01.
+    pf.vm.network "private_network",
+      ip:                 PFSENSE_VLAN10,
+      virtualbox__intnet: NET_VLAN10
+
+    # --- NIC 4: OPT2 — vlan20 (web/server segment), 172.16.20.1 ---
+    # Internal network shared with corpweb, intweb, filesharing, esite.
+    pf.vm.network "private_network",
+      ip:                 PFSENSE_VLAN20,
+      virtualbox__intnet: NET_VLAN20
+
+    # --- NIC 5: OPT3 — vlan30 (attacker segment), 172.16.30.1 ---
+    # Internal network shared with vpn and kali.
+    pf.vm.network "private_network",
+      ip:                 PFSENSE_VLAN30,
+      virtualbox__intnet: NET_VLAN30
+
+    # Copy the pre-built pfSense XML config so firewall rules and routing
+    # survive the first boot without any manual console work.
+    pf.vm.provision "file",
+      source:      "provision/pfsense_config.xml",
+      destination: "/cf/conf/config.xml"
+
+    pf.vm.provision "shell",
+      path:       "provision/pfsense.sh",
+      privileged: true
+  end
+
+  # ==========================================================================
+  # dc01 — Windows Server 2022 Standard Core — Domain Controller
+  #
+  # Boots first.  The provisioner installs AD DS, promotes the server to a DC
+  # for neutron.local, configures DNS (authoritative for neutron.local,
+  # forwarding to 8.8.8.8 for external names), and creates lab user accounts
+  # including service accounts with SPNs for Kerberoasting exercise targets.
+  # ==========================================================================
+  config.vm.define "dc01", primary: true do |dc|
+    dc.vm.box      = "gusztavvargadr/windows-server-2022-standard-core"
+    dc.vm.hostname = "dc01"
+
+    dc.vm.synced_folder ".", "/vagrant", disabled: true
+
+    dc.vm.provider "virtualbox" do |vb|
+      vb.name   = "neutron-dc01"
+      vb.memory = 4096
+      vb.cpus   = 2
+      vb.customize ["modifyvm", :id, "--vram",        "16"]
+      vb.customize ["modifyvm", :id, "--clipboard",   "disabled"]
+      vb.customize ["modifyvm", :id, "--draganddrop", "disabled"]
+    end
+
+    # --- NIC 2: vlan10 (DC segment), 172.16.10.10 ---
+    # Static IP is configured inside dc01.ps1 via netsh / Set-NetIPAddress;
+    # Vagrant just places the NIC on the correct internal network here.
+    dc.vm.network "private_network",
+      ip:                 DC01_IP,
+      virtualbox__intnet: NET_VLAN10
+
+    # --------------------------------------------------------------------------
+    # Pass 1 — static IP + AD DS install + forest promotion.
+    # dc01.ps1 ends Pass 1 with Restart-Computer, which disconnects Vagrant.
+    # Vagrant will report a connection timeout; this is expected.
+    # After vagrant up completes (or times out), run:
+    #   vagrant provision dc01
+    # to execute Pass 2 once the DC has finished rebooting.
+    # --------------------------------------------------------------------------
+    dc.vm.provision "shell",
+      name:       "dc01-pass1",
+      path:       "provision/dc01.ps1",
+      privileged: true,
+      env: {
+        "PROVISION_PASS" => "1",
+        "DC_IP"          => DC01_IP,
+        "VLAN10_GW"      => PFSENSE_VLAN10,
+      }
+
+    # --------------------------------------------------------------------------
+    # Pass 2 — post-reboot: DNS records, user accounts, ADCS PKI, IIS cert page.
+    # run: "never" prevents this from firing on the initial vagrant up.
+    # Invoke explicitly with: vagrant provision dc01 --provision-with dc01-pass2
+    # --------------------------------------------------------------------------
+    dc.vm.provision "shell",
+      name:       "dc01-pass2",
+      run:        "never",
+      path:       "provision/dc01.ps1",
+      privileged: true,
+      env: {
+        "PROVISION_PASS" => "2",
+        "DC_IP"          => DC01_IP,
+        "VLAN10_GW"      => PFSENSE_VLAN10,
+      }
+  end
+
+  # ==========================================================================
+  # corpweb — Ubuntu 22.04 — Apache + DVWA + MySQL
+  #
+  # Hosts the Damn Vulnerable Web Application on port 80 (dvwa_sqli attack
+  # path) and a MySQL instance with an empty root password (mysql_default
+  # attack path).  Default route via pfSense OPT2 gateway.
+  # ==========================================================================
+  config.vm.define "corpweb" do |cw|
+    cw.vm.box      = "gusztavvargadr/ubuntu-server-2204"
+    cw.vm.hostname = "corpweb"
+
+    cw.vm.synced_folder ".", "/vagrant", disabled: true
+
+    cw.vm.provider "virtualbox" do |vb|
+      vb.name   = "neutron-corpweb"
+      vb.memory = 1536
+      vb.cpus   = 1
+    end
+
+    # --- NIC 2: vlan20 (web/server segment), 172.16.20.11 ---
+    cw.vm.network "private_network",
+      ip:                 CORPWEB_IP,
+      virtualbox__intnet: NET_VLAN20
+
+    # The provisioner sets the default route to PFSENSE_VLAN20 so cross-VLAN
+    # traffic (e.g. AD authentication to dc01) is routed through pfSense.
+    cw.vm.provision "shell",
+      path:       "provision/corpweb.sh",
+      privileged: true,
+      env: {
+        "HOST_IP"   => CORPWEB_IP,
+        "VLAN20_GW" => PFSENSE_VLAN20,
+        "DC_IP"     => DC01_IP,
+      }
+  end
+
+  # ==========================================================================
+  # intweb — Ubuntu 22.04 — Apache + WordPress
+  #
+  # Hosts a WordPress installation with weak admin credentials
+  # (wordpress_creds attack path).  PHP and MariaDB are local.
+  # Default route via pfSense OPT2 gateway.
+  # ==========================================================================
+  config.vm.define "intweb" do |iw|
+    iw.vm.box      = "gusztavvargadr/ubuntu-server-2204"
+    iw.vm.hostname = "intweb"
+
+    iw.vm.synced_folder ".", "/vagrant", disabled: true
+
+    iw.vm.provider "virtualbox" do |vb|
+      vb.name   = "neutron-intweb"
+      vb.memory = 1536
+      vb.cpus   = 1
+    end
+
+    # --- NIC 2: vlan20 (web/server segment), 172.16.20.12 ---
+    iw.vm.network "private_network",
+      ip:                 INTWEB_IP,
+      virtualbox__intnet: NET_VLAN20
+
+    iw.vm.provision "shell",
+      path:       "provision/intweb.sh",
+      privileged: true,
+      env: {
+        "HOST_IP"   => INTWEB_IP,
+        "VLAN20_GW" => PFSENSE_VLAN20,
+        "DC_IP"     => DC01_IP,
+      }
+  end
+
+  # ==========================================================================
+  # filesharing — Ubuntu 22.04 — Samba + Redis
+  #
+  # Exposes SMB shares with guest access enabled (smb_null / credential reuse
+  # path) and an unauthenticated Redis instance on port 6379 (redis_unauth
+  # path).  Default route via pfSense OPT2 gateway.
+  # ==========================================================================
+  config.vm.define "filesharing" do |fs|
+    fs.vm.box      = "gusztavvargadr/ubuntu-server-2204"
+    fs.vm.hostname = "filesharing"
+
+    fs.vm.synced_folder ".", "/vagrant", disabled: true
+
+    fs.vm.provider "virtualbox" do |vb|
+      vb.name   = "neutron-filesharing"
+      vb.memory = 2048
+      vb.cpus   = 1
+    end
+
+    # --- NIC 2: vlan20 (web/server segment), 172.16.20.13 ---
+    fs.vm.network "private_network",
+      ip:                 FILESHARING_IP,
+      virtualbox__intnet: NET_VLAN20
+
+    fs.vm.provision "shell",
+      path:       "provision/filesharing.sh",
+      privileged: true,
+      env: {
+        "HOST_IP"   => FILESHARING_IP,
+        "VLAN20_GW" => PFSENSE_VLAN20,
+        "DC_IP"     => DC01_IP,
+      }
+  end
+
+  # ==========================================================================
+  # esite — Ubuntu 22.04 — vsftpd (anonymous FTP) + SNMP
+  #
+  # Provides anonymous FTP (ftp_anon attack path) and SNMP v2c with the
+  # default community string "public" (snmp_default attack path).
+  # Default route via pfSense OPT2 gateway.
+  # ==========================================================================
+  config.vm.define "esite" do |es|
+    es.vm.box      = "gusztavvargadr/ubuntu-server-2204"
+    es.vm.hostname = "esite"
+
+    es.vm.synced_folder ".", "/vagrant", disabled: true
+
+    es.vm.provider "virtualbox" do |vb|
+      vb.name   = "neutron-esite"
+      vb.memory = 2048
+      vb.cpus   = 1
+    end
+
+    # --- NIC 2: vlan20 (web/server segment), 172.16.20.14 ---
+    es.vm.network "private_network",
+      ip:                 ESITE_IP,
+      virtualbox__intnet: NET_VLAN20
+
+    es.vm.provision "shell",
+      path:       "provision/esite.sh",
+      privileged: true,
+      env: {
+        "HOST_IP"   => ESITE_IP,
+        "VLAN20_GW" => PFSENSE_VLAN20,
+        "DC_IP"     => DC01_IP,
+      }
+  end
+
+  # ==========================================================================
+  # vpn — Ubuntu 22.04 — OpenVPN concentrator (vlan30)
+  #
+  # Simulates a corporate VPN gateway.  Also runs SSH with password
+  # authentication enabled so it is reachable as an ssh_brute target directly
+  # from the Kali attacker on the same vlan30 segment.
+  # Default route via pfSense OPT3 gateway.
+  # ==========================================================================
+  config.vm.define "vpn" do |vp|
+    vp.vm.box      = "gusztavvargadr/ubuntu-server-2204"
+    vp.vm.hostname = "vpn"
+
+    vp.vm.synced_folder ".", "/vagrant", disabled: true
+
+    vp.vm.provider "virtualbox" do |vb|
+      vb.name   = "neutron-vpn"
+      vb.memory = 1024
+      vb.cpus   = 1
+    end
+
+    # --- NIC 2: vlan30 (attacker segment), 172.16.30.10 ---
+    vp.vm.network "private_network",
+      ip:                 VPN_IP,
+      virtualbox__intnet: NET_VLAN30
+
+    vp.vm.provision "shell",
+      path:       "provision/vpn.sh",
+      privileged: true,
+      env: {
+        "HOST_IP"   => VPN_IP,
+        "VLAN30_GW" => PFSENSE_VLAN30,
+      }
+  end
+
+  # ==========================================================================
+  # kali — Kali Linux rolling — attacker machine
+  #
+  # The autopwn pipeline (autopwn.py) runs from this machine.  Sits on vlan30
+  # and attacks targets on vlan10 and vlan20 through pfSense.  The provisioner
+  # installs required Python libraries and verifies tool availability.
+  # Default route via pfSense OPT3 gateway.
+  # ==========================================================================
+  config.vm.define "kali" do |ka|
+    ka.vm.box      = "kalilinux/rolling"
+    ka.vm.hostname = "kali"
+
+    ka.vm.synced_folder ".", "/vagrant", disabled: true
+
+    ka.vm.provider "virtualbox" do |vb|
+      vb.name   = "neutron-kali"
+      vb.memory = 4096
+      vb.cpus   = 2
+      # Extra VRAM for optional GUI session
+      vb.customize ["modifyvm", :id, "--vram", "32"]
+    end
+
+    # --- NIC 2: vlan30 (attacker segment), 172.16.30.50 ---
+    ka.vm.network "private_network",
+      ip:                 KALI_IP,
+      virtualbox__intnet: NET_VLAN30
+
+    ka.vm.provision "shell",
+      path:       "provision/kali.sh",
+      privileged: true,
+      env: {
+        "HOST_IP"   => KALI_IP,
+        "VLAN30_GW" => PFSENSE_VLAN30,
+        "DC_IP"     => DC01_IP,
+      }
+  end
+
+end
