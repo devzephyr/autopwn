@@ -1,0 +1,800 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoPwn Report &mdash; {{ cidr }}</title>
+  <!-- Bootstrap 5 CDN -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+        rel="stylesheet"
+        integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+        crossorigin="anonymous">
+  <style>
+    /* ------------------------------------------------------------------ */
+    /* Layout                                                               */
+    /* ------------------------------------------------------------------ */
+    body {
+      background-color: #f8f9fa;
+      padding-top: 56px; /* navbar height */
+    }
+
+    /* Sticky sidebar */
+    #sidebar {
+      position: sticky;
+      top: 70px;
+      height: calc(100vh - 80px);
+      overflow-y: auto;
+    }
+
+    #sidebar .nav-link {
+      color: #495057;
+      font-size: 0.875rem;
+      padding: 0.3rem 0.75rem;
+    }
+
+    #sidebar .nav-link:hover,
+    #sidebar .nav-link.active {
+      color: #0d6efd;
+      background-color: #e9ecef;
+      border-radius: 4px;
+    }
+
+    #sidebar .nav-link.section-header {
+      font-weight: 600;
+      color: #212529;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-top: 0.75rem;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Cards and sections                                                   */
+    /* ------------------------------------------------------------------ */
+    .section-anchor {
+      scroll-margin-top: 70px;
+    }
+
+    .host-card {
+      border-left: 4px solid #dee2e6;
+      transition: border-color 0.2s;
+    }
+
+    .host-card.exploited  { border-left-color: #dc3545; }
+    .host-card.enumerated { border-left-color: #ffc107; }
+
+    .stat-card {
+      border-radius: 8px;
+    }
+
+    /* Timeline */
+    .timeline-item {
+      position: relative;
+      padding-left: 1.5rem;
+    }
+
+    .timeline-item::before {
+      content: "";
+      position: absolute;
+      left: 0.4rem;
+      top: 0.55rem;
+      width: 0.5rem;
+      height: 0.5rem;
+      border-radius: 50%;
+      background-color: #6c757d;
+    }
+
+    .timeline-item.success::before { background-color: #198754; }
+    .timeline-item.failure::before { background-color: #dc3545; }
+
+    /* Evidence pre blocks */
+    pre.evidence {
+      background-color: #212529;
+      color: #f8f9fa;
+      font-size: 0.78rem;
+      border-radius: 6px;
+      padding: 1rem;
+      max-height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* NSE result badges */
+    .nse-badge {
+      font-size: 0.7rem;
+      word-break: break-word;
+    }
+
+    /* Footer */
+    footer {
+      background-color: #212529;
+      color: #adb5bd;
+      font-size: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ======================================================================
+     Navbar
+     ====================================================================== -->
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark fixed-top">
+  <div class="container-fluid">
+    <span class="navbar-brand fw-bold">
+      <span class="text-danger">Auto</span><span class="text-light">Pwn</span>
+      <small class="text-muted ms-2 fw-normal fs-6">Report</small>
+    </span>
+    <span class="navbar-text text-muted ms-auto">
+      Target: <code class="text-warning">{{ cidr }}</code>
+      &nbsp;&mdash;&nbsp;
+      Generated: {{ generated_at }}
+    </span>
+  </div>
+</nav>
+
+<!-- ======================================================================
+     Main layout: sidebar + content
+     ====================================================================== -->
+<div class="container-fluid">
+  <div class="row">
+
+    <!-- Sidebar -->
+    <nav id="sidebar" class="col-lg-2 d-none d-lg-block py-3 ps-3 border-end bg-white">
+      <ul class="nav flex-column">
+        <li class="nav-item">
+          <span class="nav-link section-header">Sections</span>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#exec-summary">Executive Summary</a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#host-cards">Host Cards</a>
+        </li>
+        {% for card in host_cards %}
+        <li class="nav-item ms-2">
+          <a class="nav-link" href="#host-{{ loop.index }}">{{ card.ip }}</a>
+        </li>
+        {% endfor %}
+        <li class="nav-item">
+          <a class="nav-link" href="#lateral-map">Lateral Movement</a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link" href="#timeline">Attack Timeline</a>
+        </li>
+        {% if ad_findings %}
+        <li class="nav-item">
+          <a class="nav-link" href="#ad-section">Active Directory</a>
+        </li>
+        {% endif %}
+        <li class="nav-item">
+          <a class="nav-link" href="#appendix">Appendix</a>
+        </li>
+      </ul>
+    </nav>
+
+    <!-- Main content -->
+    <main class="col-lg-10 py-4 px-4">
+
+      <!-- ==============================================================
+           Section 1: Executive Summary
+           ============================================================== -->
+      <section id="exec-summary" class="section-anchor mb-5">
+        <h2 class="mb-4 border-bottom pb-2">Executive Summary</h2>
+
+        <!-- Top-level metric cards -->
+        <div class="row g-3 mb-4">
+          <div class="col-sm-6 col-xl-3">
+            <div class="card stat-card text-center shadow-sm h-100">
+              <div class="card-body">
+                <div class="display-5 fw-bold text-primary">{{ stats.hosts_discovered }}</div>
+                <div class="text-muted small mt-1">Hosts Discovered</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-sm-6 col-xl-3">
+            <div class="card stat-card text-center shadow-sm h-100">
+              <div class="card-body">
+                <div class="display-5 fw-bold text-info">{{ stats.services_count }}</div>
+                <div class="text-muted small mt-1">Services Identified</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-sm-6 col-xl-3">
+            <div class="card stat-card text-center shadow-sm h-100">
+              <div class="card-body">
+                <div class="display-5 fw-bold text-danger">{{ stats.vulns_confirmed }}</div>
+                <div class="text-muted small mt-1">Vulnerabilities Confirmed</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-sm-6 col-xl-3">
+            <div class="card stat-card text-center shadow-sm h-100">
+              <div class="card-body">
+                <div class="display-5 fw-bold text-warning">{{ reuse_events | selectattr('success') | list | length }}</div>
+                <div class="text-muted small mt-1">Lateral Movement Events</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Severity breakdown -->
+        <div class="card shadow-sm mb-4">
+          <div class="card-header fw-semibold">Severity Breakdown</div>
+          <div class="card-body">
+            <div class="d-flex flex-wrap gap-3">
+              {% for label, count in stats.severity_breakdown.items() %}
+              <div class="text-center">
+                <span class="badge bg-{{ severity_class[label] | default('secondary') }} fs-5 px-3 py-2">
+                  {{ count }}
+                </span>
+                <div class="text-muted small mt-1">{{ label }}</div>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+
+        <!-- Per-host exploitation outcome table -->
+        <div class="card shadow-sm">
+          <div class="card-header fw-semibold">Exploitation Outcomes</div>
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-hover mb-0">
+                <thead class="table-dark">
+                  <tr>
+                    <th>Host</th>
+                    <th>Hostname</th>
+                    <th>OS</th>
+                    <th>Status</th>
+                    <th>Technique</th>
+                    <th>Severity</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for card in host_cards %}
+                  <tr>
+                    <td><code>{{ card.ip }}</code></td>
+                    <td>{{ card.hostname }}</td>
+                    <td>{{ card.os_guess | default('Unknown') }}</td>
+                    <td>
+                      {% if card.status == 'Exploited' %}
+                        <span class="badge bg-danger">Exploited</span>
+                      {% elif card.status == 'Enumerated' %}
+                        <span class="badge bg-warning text-dark">Enumerated</span>
+                      {% else %}
+                        <span class="badge bg-secondary">Not compromised</span>
+                      {% endif %}
+                    </td>
+                    <td>
+                      {% set successful_exploits = card.exploits | selectattr('success') | list %}
+                      {% if successful_exploits %}
+                        <code>{{ successful_exploits[0].technique }}</code>
+                      {% else %}
+                        <span class="text-muted">—</span>
+                      {% endif %}
+                    </td>
+                    <td>
+                      {% set successful_exploits = card.exploits | selectattr('success') | list %}
+                      {% if successful_exploits %}
+                        {% set sev = successful_exploits[0].severity | default('Low') %}
+                        <span class="badge bg-{{ successful_exploits[0].severity_class | default('secondary') }}">
+                          {{ sev }}
+                        </span>
+                      {% else %}
+                        <span class="text-muted">—</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                  {% else %}
+                  <tr>
+                    <td colspan="6" class="text-center text-muted py-3">No host data available.</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==============================================================
+           Section 2: Host Cards
+           ============================================================== -->
+      <section id="host-cards" class="section-anchor mb-5">
+        <h2 class="mb-4 border-bottom pb-2">Host Cards</h2>
+
+        {% for card in host_cards %}
+        <div id="host-{{ loop.index }}"
+             class="card shadow-sm mb-4 host-card {% if card.exploited %}exploited{% elif card.postex.commands_run %}enumerated{% endif %}">
+
+          <!-- Card header -->
+          <div class="card-header d-flex flex-wrap align-items-center gap-2 bg-light">
+            <span class="fw-bold fs-5"><code>{{ card.ip }}</code></span>
+            <span class="text-muted">&mdash; {{ card.hostname }}</span>
+            <span class="text-muted small">{{ card.os_guess | default('Unknown OS') }}</span>
+            <span class="ms-auto">
+              {% if card.status == 'Exploited' %}
+                <span class="badge bg-danger fs-6">Exploited</span>
+              {% elif card.status == 'Enumerated' %}
+                <span class="badge bg-warning text-dark fs-6">Enumerated</span>
+              {% else %}
+                <span class="badge bg-secondary fs-6">Not compromised</span>
+              {% endif %}
+            </span>
+          </div>
+
+          <div class="card-body">
+
+            <!-- Flags row -->
+            {% if card.flags %}
+            <div class="mb-3 d-flex flex-wrap gap-2">
+              {% if card.flags.is_domain_controller %}
+                <span class="badge bg-danger">Domain Controller</span>
+              {% endif %}
+              {% if card.flags.ms17_010_vulnerable %}
+                <span class="badge bg-danger">MS17-010 Vulnerable</span>
+              {% endif %}
+              {% if card.flags.has_wordpress %}
+                <span class="badge bg-warning text-dark">WordPress</span>
+              {% endif %}
+              {% if card.flags.has_dvwa %}
+                <span class="badge bg-warning text-dark">DVWA</span>
+              {% endif %}
+            </div>
+            {% endif %}
+
+            <!-- Open services table -->
+            <h6 class="fw-semibold">Open Services</h6>
+            {% if card.ports %}
+            <div class="table-responsive mb-3">
+              <table class="table table-sm table-bordered mb-0">
+                <thead class="table-secondary">
+                  <tr>
+                    <th>Port</th>
+                    <th>Proto</th>
+                    <th>Service</th>
+                    <th>Version</th>
+                    <th>NSE Results</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for port in card.ports %}
+                  {% if port.state == 'open' %}
+                  <tr>
+                    <td><strong>{{ port.port }}</strong></td>
+                    <td>{{ port.protocol | upper }}</td>
+                    <td>{{ port.service | default('—') }}</td>
+                    <td>{{ port.version | default('—') }}</td>
+                    <td>
+                      {% if port.nse_results %}
+                        {% for script, result in port.nse_results.items() %}
+                          <div class="nse-badge">
+                            <span class="badge bg-light text-dark border">{{ script }}</span>
+                            <small class="text-muted">{{ result | truncate(80) }}</small>
+                          </div>
+                        {% endfor %}
+                      {% else %}
+                        <span class="text-muted">—</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                  {% endif %}
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+            <p class="text-muted small">No port data available.</p>
+            {% endif %}
+
+            <!-- Attack paths attempted -->
+            {% if card.attack_paths %}
+            <h6 class="fw-semibold">Attack Paths Planned</h6>
+            <div class="table-responsive mb-3">
+              <table class="table table-sm table-bordered mb-0">
+                <thead class="table-secondary">
+                  <tr>
+                    <th>Technique</th>
+                    <th>Confidence</th>
+                    <th>Score</th>
+                    <th>Conditions Met</th>
+                    <th>Priority</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for path in card.attack_paths %}
+                  <tr>
+                    <td><code>{{ path.path }}</code></td>
+                    <td>
+                      {% if path.confidence == 'HIGH' %}
+                        <span class="badge bg-danger">HIGH</span>
+                      {% elif path.confidence == 'MEDIUM' %}
+                        <span class="badge bg-warning text-dark">MEDIUM</span>
+                      {% else %}
+                        <span class="badge bg-secondary">LOW</span>
+                      {% endif %}
+                    </td>
+                    <td>{{ path.score | default(0) }}</td>
+                    <td>
+                      {% for cond in path.conditions_met | default([]) %}
+                        <span class="badge bg-light text-dark border me-1">{{ cond }}</span>
+                      {% endfor %}
+                    </td>
+                    <td>{{ path.priority | default('—') }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% endif %}
+
+            <!-- Exploitation results -->
+            {% if card.exploits %}
+            <h6 class="fw-semibold">Exploitation Results</h6>
+            {% for exploit in card.exploits %}
+            <div class="card mb-2 border-{{ 'success' if exploit.success else 'danger' }}">
+              <div class="card-header py-1 d-flex align-items-center gap-2
+                          {{ 'bg-success bg-opacity-10' if exploit.success else 'bg-danger bg-opacity-10' }}">
+                <code>{{ exploit.technique }}</code>
+                {% if exploit.success %}
+                  <span class="badge bg-success ms-1">Success</span>
+                {% else %}
+                  <span class="badge bg-danger ms-1">Failed</span>
+                {% endif %}
+                <span class="badge bg-{{ exploit.severity_class | default('secondary') }} ms-1">
+                  {{ exploit.severity | default('Low') }}
+                </span>
+                {% if exploit.session_type and exploit.session_type != 'none' %}
+                  <span class="badge bg-info text-dark ms-1">{{ exploit.session_type }}</span>
+                {% endif %}
+              </div>
+              {% if exploit.evidence %}
+              <div class="card-body py-2">
+                <pre class="evidence mb-0">{{ exploit.evidence | truncate(500) }}</pre>
+              </div>
+              {% endif %}
+              {% if exploit.credentials_recovered %}
+              <div class="card-footer py-1">
+                <small class="fw-semibold">Credentials recovered:</small>
+                {% for cred in exploit.credentials_recovered %}
+                  <code class="ms-2 text-danger">{{ cred.username | default('') }}:{{ cred.password | default('') }}</code>
+                {% endfor %}
+              </div>
+              {% endif %}
+              {% if exploit.error %}
+              <div class="card-footer py-1 text-danger">
+                <small>Error: {{ exploit.error }}</small>
+              </div>
+              {% endif %}
+            </div>
+            {% endfor %}
+            {% endif %}
+
+            <!-- Post-exploitation findings -->
+            {% if card.postex and card.postex.commands_run %}
+            <h6 class="fw-semibold mt-3">Post-Exploitation Summary</h6>
+            <div class="d-flex flex-wrap gap-2 mb-2">
+              <span class="badge bg-light text-dark border">
+                {{ card.postex.commands_run | length }} command(s) run
+              </span>
+              {% if card.postex.credentials_found %}
+              <span class="badge bg-danger">
+                {{ card.postex.credentials_found | length }} credential(s) found
+              </span>
+              {% endif %}
+              {% if card.postex.files_of_interest %}
+              <span class="badge bg-warning text-dark">
+                {{ card.postex.files_of_interest | length }} file(s) of interest
+              </span>
+              {% endif %}
+            </div>
+            <p class="text-muted small mb-0">
+              Full output available in <a href="#appendix">Appendix &mdash; Raw Evidence</a>.
+            </p>
+            {% endif %}
+
+          </div>{# /card-body #}
+        </div>{# /host-card #}
+        {% else %}
+        <div class="alert alert-secondary">No host data available. Run the discovery and enrichment stages first.</div>
+        {% endfor %}
+      </section>
+
+      <!-- ==============================================================
+           Section 3: Lateral Movement Map
+           ============================================================== -->
+      <section id="lateral-map" class="section-anchor mb-5">
+        <h2 class="mb-4 border-bottom pb-2">Lateral Movement Map</h2>
+
+        {% if reuse_events %}
+        <div class="card shadow-sm">
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table table-hover mb-0">
+                <thead class="table-dark">
+                  <tr>
+                    <th>Source Host</th>
+                    <th>Credential Used</th>
+                    <th>Target Host</th>
+                    <th>Service</th>
+                    <th>Status</th>
+                    <th>Evidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for event in reuse_events %}
+                  <tr>
+                    <td><code>{{ event.source_host | default('—') }}</code></td>
+                    <td>
+                      {% if event.credential %}
+                        <code class="text-danger">
+                          {{ event.credential.username | default('') }}:{{ event.credential.password | default('') }}
+                        </code>
+                        {% if event.credential.domain is defined and event.credential.domain %}
+                          <small class="text-muted">({{ event.credential.domain }})</small>
+                        {% endif %}
+                      {% else %}
+                        <span class="text-muted">—</span>
+                      {% endif %}
+                    </td>
+                    <td><code>{{ event.target_host | default('—') }}</code></td>
+                    <td><span class="badge bg-secondary">{{ event.service | default('—') | upper }}</span></td>
+                    <td>
+                      {% if event.success %}
+                        <span class="badge bg-success">Success</span>
+                      {% else %}
+                        <span class="badge bg-danger">Failed</span>
+                      {% endif %}
+                    </td>
+                    <td>
+                      {% if event.evidence %}
+                        <small class="text-muted">{{ event.evidence | truncate(60) }}</small>
+                      {% else %}
+                        <span class="text-muted">—</span>
+                      {% endif %}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        {% else %}
+        <div class="alert alert-secondary">No lateral movement events recorded.</div>
+        {% endif %}
+      </section>
+
+      <!-- ==============================================================
+           Section 4: Attack Timeline
+           ============================================================== -->
+      <section id="timeline" class="section-anchor mb-5">
+        <h2 class="mb-4 border-bottom pb-2">Attack Timeline</h2>
+
+        {% if timeline_events %}
+        <div class="card shadow-sm">
+          <div class="card-body">
+            <ul class="list-group list-group-flush">
+              {% for event in timeline_events %}
+              <li class="list-group-item px-0">
+                <div class="timeline-item {{ 'success' if event.success is defined and event.success else
+                                             'failure' if event.success is defined and not event.success else '' }}">
+                  <div class="d-flex flex-wrap align-items-start gap-2">
+                    <span class="text-muted small text-nowrap" style="min-width:160px;">
+                      {{ event.timestamp | default('—') }}
+                    </span>
+                    <div>
+                      {% if event.stage is defined %}
+                        <span class="badge bg-light text-dark border me-1">{{ event.stage }}</span>
+                      {% endif %}
+                      {% if event.host is defined %}
+                        <code class="me-1">{{ event.host }}</code>
+                      {% endif %}
+                      {% if event.technique is defined %}
+                        <span class="badge bg-secondary me-1">{{ event.technique }}</span>
+                      {% endif %}
+                      <span>{{ event.message | default(event.action | default('')) }}</span>
+                      {% if event.success is defined %}
+                        {% if event.success %}
+                          <span class="badge bg-success ms-1">OK</span>
+                        {% else %}
+                          <span class="badge bg-danger ms-1">FAIL</span>
+                        {% endif %}
+                      {% endif %}
+                    </div>
+                  </div>
+                </div>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+        </div>
+        {% else %}
+        <div class="alert alert-secondary">No timeline data available. The pipeline appends events to
+          <code>state/timeline.json</code> during execution.</div>
+        {% endif %}
+      </section>
+
+      <!-- ==============================================================
+           Section 4b: Active Directory Findings (conditional)
+           ============================================================== -->
+      {% if ad_findings %}
+      <section id="ad-section" class="section-anchor mb-5">
+        <h2 class="mb-4 border-bottom pb-2">Active Directory Findings</h2>
+
+        <div class="row g-3 mb-4">
+          <div class="col-md-6">
+            <div class="card shadow-sm h-100">
+              <div class="card-header fw-semibold">Domain Information</div>
+              <div class="card-body">
+                <dl class="row mb-0">
+                  <dt class="col-sm-4">Domain</dt>
+                  <dd class="col-sm-8"><code>{{ ad_findings.domain | default('N/A') }}</code></dd>
+                  <dt class="col-sm-4">DC IP</dt>
+                  <dd class="col-sm-8"><code>{{ ad_findings.dc_ip | default('N/A') }}</code></dd>
+                  <dt class="col-sm-4">Users Found</dt>
+                  <dd class="col-sm-8">{{ ad_findings.users | default([]) | length }}</dd>
+                  <dt class="col-sm-4">AS-REP Hashes</dt>
+                  <dd class="col-sm-8">
+                    <span class="badge bg-{{ 'danger' if ad_findings.asrep_hashes else 'secondary' }}">
+                      {{ ad_findings.asrep_hashes | default([]) | length }}
+                    </span>
+                  </dd>
+                  <dt class="col-sm-4">Kerberoast Hashes</dt>
+                  <dd class="col-sm-8">
+                    <span class="badge bg-{{ 'danger' if ad_findings.kerberoast_hashes else 'secondary' }}">
+                      {{ ad_findings.kerberoast_hashes | default([]) | length }}
+                    </span>
+                  </dd>
+                </dl>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-md-6">
+            <div class="card shadow-sm h-100">
+              <div class="card-header fw-semibold">Cracked Credentials</div>
+              <div class="card-body">
+                {% if ad_findings.cracked_credentials %}
+                <ul class="list-group list-group-flush">
+                  {% for cred in ad_findings.cracked_credentials %}
+                  <li class="list-group-item px-0">
+                    <code class="text-danger">{{ cred.username }}:{{ cred.password }}</code>
+                    {% if cred.domain %}
+                      <small class="text-muted ms-2">{{ cred.domain }}</small>
+                    {% endif %}
+                  </li>
+                  {% endfor %}
+                </ul>
+                {% else %}
+                <p class="text-muted mb-0">No credentials cracked.</p>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Enumerated users -->
+        {% if ad_findings.users %}
+        <div class="card shadow-sm">
+          <div class="card-header fw-semibold">Enumerated Domain Users ({{ ad_findings.users | length }})</div>
+          <div class="card-body">
+            <div class="d-flex flex-wrap gap-2">
+              {% for user in ad_findings.users %}
+              <span class="badge bg-light text-dark border">{{ user }}</span>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
+      </section>
+      {% endif %}
+
+      <!-- ==============================================================
+           Section 5: Appendix - Raw Evidence
+           ============================================================== -->
+      <section id="appendix" class="section-anchor mb-5">
+        <h2 class="mb-4 border-bottom pb-2">Appendix: Raw Evidence</h2>
+
+        {% if postex_hosts %}
+        <div class="accordion" id="appendixAccordion">
+          {% for host in postex_hosts %}
+          <div class="accordion-item">
+            <h2 class="accordion-header" id="postex-heading-{{ loop.index }}">
+              <button class="accordion-button collapsed" type="button"
+                      data-bs-toggle="collapse"
+                      data-bs-target="#postex-collapse-{{ loop.index }}"
+                      aria-expanded="false"
+                      aria-controls="postex-collapse-{{ loop.index }}">
+                <code class="me-2">{{ host.ip }}</code>
+                <span class="text-muted">{{ host.os | default('Unknown OS') }}</span>
+                <span class="badge bg-secondary ms-auto me-2">
+                  {{ host.commands_run | default([]) | length }} command(s)
+                </span>
+              </button>
+            </h2>
+            <div id="postex-collapse-{{ loop.index }}"
+                 class="accordion-collapse collapse"
+                 aria-labelledby="postex-heading-{{ loop.index }}"
+                 data-bs-parent="#appendixAccordion">
+              <div class="accordion-body">
+
+                <!-- Commands run -->
+                {% for cmd in host.commands_run | default([]) %}
+                <div class="mb-3">
+                  <div class="d-flex align-items-center gap-2 mb-1">
+                    <span class="badge bg-dark">CMD</span>
+                    <code class="text-primary">{{ cmd.command }}</code>
+                  </div>
+                  <pre class="evidence">{{ cmd.output | default('(no output)') }}</pre>
+                </div>
+                {% endfor %}
+
+                <!-- Credentials found during post-ex -->
+                {% if host.credentials_found %}
+                <div class="mb-3">
+                  <h6 class="fw-semibold text-danger">Credentials Found</h6>
+                  <ul class="list-group list-group-flush">
+                    {% for cred in host.credentials_found %}
+                    <li class="list-group-item px-0">
+                      <code class="text-danger">{{ cred }}</code>
+                    </li>
+                    {% endfor %}
+                  </ul>
+                </div>
+                {% endif %}
+
+                <!-- Files of interest -->
+                {% if host.files_of_interest %}
+                <div class="mb-3">
+                  <h6 class="fw-semibold text-warning">Files of Interest</h6>
+                  <ul class="list-group list-group-flush">
+                    {% for f in host.files_of_interest %}
+                    <li class="list-group-item px-0">
+                      <code>{{ f }}</code>
+                    </li>
+                    {% endfor %}
+                  </ul>
+                </div>
+                {% endif %}
+
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="alert alert-secondary">
+          No post-exploitation data available. Post-exploitation runs only after a successful shell
+          or WinRM session is established.
+        </div>
+        {% endif %}
+
+      </section>
+
+    </main>{# /main content #}
+  </div>{# /row #}
+</div>{# /container-fluid #}
+
+<!-- ======================================================================
+     Footer
+     ====================================================================== -->
+<footer class="py-3 mt-4">
+  <div class="container-fluid px-4">
+    <div class="d-flex flex-wrap justify-content-between align-items-center">
+      <span>
+        <strong class="text-white">AutoPwn</strong> &mdash; RIS602 Final Project &mdash; Seneca Polytechnic
+      </span>
+      <span>Report generated: {{ generated_at }}</span>
+    </div>
+  </div>
+</footer>
+
+<!-- Bootstrap 5 JS bundle (includes Popper) -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc4s9bIOgUxi8T/jzmLXb6JOLKnwMnKB6AQy4UMqhw"
+        crossorigin="anonymous"></script>
+</body>
+</html>
