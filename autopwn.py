@@ -552,6 +552,43 @@ def _merge_discovery(new_cidr: str) -> None:
         ok(f"Merged {added} new host(s) from pivot CIDR {new_cidr} into discovery.json")
 
 
+def _merge_by_host(state_key: str, prior: dict, list_key: str, id_key: str = "ip") -> None:
+    """
+    Merge prior[list_key] entries into the current state file for state_key,
+    deduplicating on id_key.  Used to preserve results from earlier iterations
+    when a pivot overwrites the file.
+    """
+    prior_items = prior.get(list_key, [])
+    if not prior_items:
+        return
+    current = _load_json(STATE_FILES[state_key]) or {list_key: []}
+    seen = {item.get(id_key) for item in current.get(list_key, [])}
+    added = 0
+    for item in prior_items:
+        if item.get(id_key) not in seen:
+            current.setdefault(list_key, []).append(item)
+            seen.add(item.get(id_key))
+            added += 1
+    if added:
+        _atomic_write(STATE_FILES[state_key], current)
+        info(f"Accumulated {added} prior {list_key} entry/entries into {state_key}.json")
+
+
+def _merge_append(state_key: str, prior: dict, list_key: str) -> None:
+    """
+    Append all prior[list_key] entries to the current state file for state_key.
+    Used for lists where deduplication by a single key is not meaningful
+    (e.g. exploitation results, lateral movement events).
+    """
+    prior_items = prior.get(list_key, [])
+    if not prior_items:
+        return
+    current = _load_json(STATE_FILES[state_key]) or {list_key: []}
+    current.setdefault(list_key, []).extend(prior_items)
+    _atomic_write(STATE_FILES[state_key], current)
+    info(f"Accumulated {len(prior_items)} prior {list_key} entry/entries into {state_key}.json")
+
+
 # ---------------------------------------------------------------------------
 # Single pipeline pass (stages 1-7 for one CIDR)
 # ---------------------------------------------------------------------------
@@ -561,31 +598,44 @@ def _run_pass(cidr: str, lhost: str, args: argparse.Namespace,
     """
     Execute stages 1–7 for the given CIDR.
     When pivot=True the discovery output is written to discovery_pivot.json
-    so it can be merged without overwriting the primary run.
+    so it can be merged without overwriting the primary run.  Results from
+    prior iterations are snapshotted before each stage runs and merged back
+    in afterward so the final report reflects all iterations.
     """
     tag = f"iter{iteration}"
     resume = args.resume and iteration == 1  # only honour --resume on first pass
 
-    # Stages 1 & 2 always re-run for each new CIDR (no checkpoint skip on pivots)
+    # Snapshot prior-iteration results before stages overwrite the state files.
+    # Each snapshot is empty on the first pass so the merge helpers no-op.
+    prior_services  = (_load_json(STATE_FILES["services"])     or {"hosts": []})       if pivot else {}
+    prior_exploit   = (_load_json(STATE_FILES["exploitation"]) or {"results": []})     if pivot else {}
+    prior_lateral   = (_load_json(STATE_FILES["lateral"])      or {"reuse_events": []}) if pivot else {}
+    prior_postex    = (_load_json(STATE_FILES["postex"])       or {"hosts": []})        if pivot else {}
+
+    # Stage 1: Discovery
     def run_discovery():
         from modules import discovery  # type: ignore
-        result = discovery.run(cidr)
+        discovered = discovery.run(cidr)
         if pivot:
-            # Save pivot-specific copy for merging
-            _atomic_write(STATE_DIR / "discovery_pivot.json",
-                          _load_json(STATE_FILES["discovery"]) or {})
+            # Save a pivot-specific copy so _merge_discovery can diff against it
+            _atomic_write(STATE_DIR / "discovery_pivot.json", discovered or {})
 
     _run_stage(f"Host Discovery [{tag}]", "discovery", run_discovery, resume)
 
     if pivot:
         _merge_discovery(cidr)
 
+    # Stage 2: Enrichment
     def run_enrichment():
         from modules import enrichment  # type: ignore
         enrichment.run()
 
     _run_stage(f"Service Enrichment [{tag}]", "services", run_enrichment, resume)
 
+    if pivot:
+        _merge_by_host("services", prior_services, "hosts")
+
+    # Stage 3: AD Enumeration
     def run_ad_enum():
         from modules import ad_enum  # type: ignore
         ad_enum.run()
@@ -595,13 +645,14 @@ def _run_pass(cidr: str, lhost: str, args: argparse.Namespace,
         resume, skip=args.skip_ad,
     )
 
+    # Stage 4: Planner
     def run_planner():
         from modules import planner  # type: ignore
         planner.run()
 
     _run_stage(f"Attack Planning [{tag}]", "attack_plan", run_planner, resume)
 
-    # Stage 5
+    # Stage 5: Exploitation
     attack_plan = _load_json(STATE_FILES["attack_plan"]) or {"attack_paths": []}
     banner_stage(5, f"Exploitation [{tag}]")
     tlog("exploitation", f"Stage started [{tag}]", "start")
@@ -616,12 +667,20 @@ def _run_pass(cidr: str, lhost: str, args: argparse.Namespace,
             err(f"Exploitation failed: {exc}")
             tlog("exploitation", f"Stage failed: {exc}", "error")
 
+    if pivot:
+        _merge_append("exploitation", prior_exploit, "results")
+
+    # Stage 6: Credential Reuse
     def run_reuse():
         from modules import reuse  # type: ignore
         reuse.run()
 
     _run_stage(f"Credential Reuse [{tag}]", "lateral", run_reuse, resume)
 
+    if pivot:
+        _merge_append("lateral", prior_lateral, "reuse_events")
+
+    # Stage 7: Post-Exploitation
     def run_postex():
         from modules import postex  # type: ignore
         postex.run()
@@ -630,6 +689,9 @@ def _run_pass(cidr: str, lhost: str, args: argparse.Namespace,
         f"Post-Exploitation [{tag}]", "postex", run_postex,
         resume, skip=args.skip_postex,
     )
+
+    if pivot:
+        _merge_by_host("postex", prior_postex, "hosts")
 
 
 # ---------------------------------------------------------------------------
