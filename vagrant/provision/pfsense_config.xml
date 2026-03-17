@@ -342,8 +342,26 @@
       <descr>ALLOW vpn-server NATed traffic to vlan10 (VPN pivot path)</descr>
     </rule>
 
+    <!-- RULE V30-1b: ALLOW vpn-server (172.16.30.30) to vlan20 any
+         VPN-connected kali (NATed through vpn server) needs ALL vlan20 ports:
+         Odoo :8069, Nextcloud :9000, MySQL :3306, Redis :6379, NFS :2049.
+         Must precede the BLOCK rules below (first-match wins). -->
+    <rule>
+      <type>pass</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <address>172.16.30.30</address>
+      </source>
+      <destination>
+        <network>opt2</network>
+      </destination>
+      <descr>ALLOW vpn-server NATed traffic to vlan20 all ports (VPN pivot)</descr>
+    </rule>
+
     <!-- RULE V30-2: BLOCK vlan30 to vlan20 tcp/8069,9000,9443
-         Internal apps not reachable from DMZ. -->
+         Internal apps not reachable from DMZ (except via VPN pivot above). -->
     <rule>
       <type>block</type>
       <interface>opt3</interface>

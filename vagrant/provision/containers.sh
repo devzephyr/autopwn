@@ -134,6 +134,9 @@ mkdir -p /opt/containers
 cat > /opt/containers/docker-compose.yml <<'COMPOSE'
 version: "3.9"
 
+# Memory limits prevent any single container from OOMing the VM (4 GB total).
+# Odoo and MySQL are the biggest consumers; all others are lightweight.
+
 services:
 
   corpweb:
@@ -146,6 +149,7 @@ services:
       - /opt/containers/corpweb:/usr/share/nginx/html:ro
       - /opt/containers/nginx-corpweb.conf:/etc/nginx/conf.d/default.conf:ro
       - /etc/ssl/containers:/etc/ssl/containers:ro
+    mem_limit: 128m
     restart: unless-stopped
 
   esite:
@@ -163,6 +167,7 @@ services:
       - /opt/containers/esite:/var/www/html
     depends_on:
       - mysql
+    mem_limit: 256m
     restart: unless-stopped
 
   odoo:
@@ -176,6 +181,7 @@ services:
       - PASSWORD=odoo
     depends_on:
       - postgres
+    mem_limit: 768m
     restart: unless-stopped
 
   nextcloud:
@@ -194,6 +200,7 @@ services:
       - mariadb
     volumes:
       - /srv/nextcloud:/var/www/html
+    mem_limit: 512m
     restart: unless-stopped
 
   mysql:
@@ -207,6 +214,7 @@ services:
       - MYSQL_DATABASE=shop
       - MYSQL_USER=shopuser
       - MYSQL_PASSWORD=shoppass
+    mem_limit: 512m
     restart: unless-stopped
 
   postgres:
@@ -216,6 +224,7 @@ services:
       - POSTGRES_DB=postgres
       - POSTGRES_USER=odoo
       - POSTGRES_PASSWORD=odoo
+    mem_limit: 256m
     restart: unless-stopped
 
   mariadb:
@@ -226,6 +235,7 @@ services:
       - MARIADB_DATABASE=nextcloud
       - MARIADB_USER=ncuser
       - MARIADB_PASSWORD=ncpass
+    mem_limit: 256m
     restart: unless-stopped
 
   redis:
@@ -234,6 +244,7 @@ services:
     ports:
       - "6379:6379"
     command: redis-server --protected-mode no
+    mem_limit: 64m
     restart: unless-stopped
 COMPOSE
 

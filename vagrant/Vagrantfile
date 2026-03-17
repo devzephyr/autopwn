@@ -402,7 +402,7 @@ Vagrant.configure("2") do |config|
 
     jb.vm.provider "virtualbox" do |vb|
       vb.name   = "neutron-jumpbox"
-      vb.memory = 1024
+      vb.memory = 2048   # xRDP + xfce4 desktop needs ~1.5 GB minimum
       vb.cpus   = 1
     end
 

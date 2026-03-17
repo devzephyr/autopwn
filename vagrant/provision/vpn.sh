@@ -48,6 +48,10 @@ network:
       routes:
         - to: default
           via: ${GATEWAY}
+        - to: 172.16.10.0/24
+          via: ${GATEWAY}
+        - to: 172.16.20.0/24
+          via: ${GATEWAY}
       nameservers:
         addresses: [${DNS}]
       dhcp4: false
@@ -160,22 +164,22 @@ if [[ ! -f "${SYSCTL_CONF}" ]]; then
 fi
 sysctl -p "${SYSCTL_CONF}" 2>/dev/null || true
 
-# Determine the outbound (non-VPN) interface — typically eth0 under Vagrant
-OUTBOUND_IFACE="$(ip route | awk '/default/ {print $5; exit}')"
-log "NAT masquerade outbound via ${OUTBOUND_IFACE}"
+# NAT masquerade VPN client traffic (10.8.0.0/24) through IFACE (eth1/VLAN30).
+# This makes pfSense see traffic as coming from 172.16.30.30, enabling the
+# VPN pivot path: pfSense rule V30-1 allows 172.16.30.30 to reach VLAN10/20.
+# IMPORTANT: must use IFACE (eth1), NOT the default-route interface (eth0).
+log "NAT masquerade outbound via ${IFACE} (VLAN30 — pfSense sees 172.16.30.30)"
 
-# iptables-persistent: apply rules idempotently
 RULES_FILE="/etc/iptables/rules.v4"
-# Only insert the rule if it is not already present
-if ! iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o "${OUTBOUND_IFACE}" -j MASQUERADE 2>/dev/null; then
-    iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "${OUTBOUND_IFACE}" -j MASQUERADE
+if ! iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o "${IFACE}" -j MASQUERADE 2>/dev/null; then
+    iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "${IFACE}" -j MASQUERADE
 fi
-if ! iptables -C FORWARD -i tun0 -o "${OUTBOUND_IFACE}" -j ACCEPT 2>/dev/null; then
-    iptables -A FORWARD -i tun0 -o "${OUTBOUND_IFACE}" -j ACCEPT
+if ! iptables -C FORWARD -i tun0 -o "${IFACE}" -j ACCEPT 2>/dev/null; then
+    iptables -A FORWARD -i tun0 -o "${IFACE}" -j ACCEPT
 fi
-if ! iptables -C FORWARD -i "${OUTBOUND_IFACE}" -o tun0 -m state \
+if ! iptables -C FORWARD -i "${IFACE}" -o tun0 -m state \
         --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
-    iptables -A FORWARD -i "${OUTBOUND_IFACE}" -o tun0 \
+    iptables -A FORWARD -i "${IFACE}" -o tun0 \
         -m state --state RELATED,ESTABLISHED -j ACCEPT
 fi
 
