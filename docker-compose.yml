@@ -194,10 +194,8 @@ services:
       LDAP_READONLY_USER_USERNAME: "readonly"
       LDAP_READONLY_USER_PASSWORD: "readonly"
       # Allow anonymous bind for testing
-      LDAP_REMOVE_CONFIG_AFTER_SETUP: "true"
+      LDAP_REMOVE_CONFIG_AFTER_SETUP: "false"
       LDAP_TLS: "false"
-    volumes:
-      - ./ldap_seed:/container/service/slapd/assets/config/bootstrap/ldif/custom
     restart: unless-stopped
 
   # ── SNMP TARGET ──────────────────────────────────────────────────────────────
