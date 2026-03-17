@@ -185,7 +185,7 @@ services:
       autopwn_net:
         ipv4_address: 172.28.0.40
     ports:
-      - "389:389"
+      - "1389:389"    # 389 is privileged on macOS; use localhost:1389 for testing
     environment:
       LDAP_ORGANISATION: "Neutron Corp"
       LDAP_DOMAIN: "neutron.local"
