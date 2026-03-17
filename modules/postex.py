@@ -588,7 +588,7 @@ def run() -> list[dict]:
 def _write_postex(hosts: list[dict]) -> None:
     STATE_DIR.mkdir(exist_ok=True)
     payload = json.dumps({"hosts": hosts}, indent=2)
-    tmp = POSTEX_JSON.with_suffix(".json.tmp")
+    tmp = POSTEX_JSON.with_suffix(".tmp")
     tmp.write_text(payload)
     tmp.rename(POSTEX_JSON)
     print(f"\n[postex] state/postex.json written ({len(hosts)} host(s)).")

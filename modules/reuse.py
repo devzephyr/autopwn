@@ -432,7 +432,7 @@ def run() -> list[dict]:
 def _write_lateral(reuse_events: list[dict]) -> None:
     STATE_DIR.mkdir(exist_ok=True)
     payload = json.dumps({"reuse_events": reuse_events}, indent=2)
-    tmp = LATERAL_JSON.with_suffix(".json.tmp")
+    tmp = LATERAL_JSON.with_suffix(".tmp")
     tmp.write_text(payload)
     tmp.rename(LATERAL_JSON)
     print(f"[reuse] state/lateral.json written ({len(reuse_events)} event(s)).")

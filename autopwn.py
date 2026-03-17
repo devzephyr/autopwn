@@ -278,14 +278,14 @@ def _run_stage(
 # Map attack path names to (module_path, function_name)
 EXPLOIT_DISPATCH: dict[str, tuple[str, str]] = {
     "ms17_010":        ("modules.exploits.smb",      "exploit_ms17_010"),
-    "kerberoast":      ("modules.exploits.smb",      "exploit_ms17_010"),   # placeholder; kerberoast is AD-side
+    # kerberoast is fully handled in Stage 3 (ad_enum.py) — no dispatch entry needed
     "wordpress_creds": ("modules.exploits.web",      "exploit_wordpress"),
     "dvwa_sqli":       ("modules.exploits.web",      "exploit_dvwa"),
     "mysql_default":   ("modules.exploits.database", "exploit_mysql"),
     "redis_unauth":    ("modules.exploits.database", "exploit_redis"),
     "ssh_brute":       ("modules.exploits.ssh",      "exploit_ssh"),
     "smb_null":        ("modules.exploits.smb",      "exploit_smb_null"),
-    "ftp_anon":        ("modules.exploits.smb",      "exploit_ftp_anon"),   # placeholder
+    # ftp_anon: no exploit module implemented; planner paths will be logged and skipped
     "winrm_creds":     ("modules.exploits.winrm",    "exploit_winrm"),
 }
 

@@ -340,7 +340,7 @@ def asrep_roast(dc_ip: str, domain: str, users: list[str]) -> list[str]:
             # KDC_ERR_C_PRINCIPAL_UNKNOWN (6) — user does not exist
             if "KDC_ERR_C_PRINCIPAL_UNKNOWN" in exc_str or "6" in exc_str:
                 continue
-            # eRR_CLIENT_REVOKED (18) — account disabled/locked
+            # KDC_ERR_CLIENT_REVOKED (18) — account disabled/locked
             if "KDC_ERR_CLIENT_REVOKED" in exc_str or "18" in exc_str:
                 _log(f"    {username}: account disabled/locked — skipping")
                 continue
@@ -1040,8 +1040,6 @@ def run() -> dict:
                             no_preauth_users.append(u)
 
                     if no_preauth_users:
-                        # Use all discovered usernames as the SPN query list too
-                        query_users = list(dict.fromkeys(all_users + no_preauth_users))
                         np_tgs = kerberoast_no_preauth_subprocess(
                             dc_ip, domain, no_preauth_users, get_spns
                         )
