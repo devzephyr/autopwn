@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ─────────────────────────────────────────────────────────────────────────────
 # RIS602 Autopwn - Incremental Test Environment
 #
@@ -14,6 +12,9 @@ version: "3.9"
 #
 # Network: all containers on 172.28.0.0/24
 # Your Kali will reach them via the docker bridge (no VMs needed)
+#
+# M1/M2/M3 Mac: platform: linux/amd64 forces Rosetta x86 emulation for
+# images that don't publish ARM64 builds. Slightly slower but fully functional.
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -30,6 +31,7 @@ services:
   # Weak password: root / password123
   ssh_target:
     image: rastasheep/ubuntu-sshd:18.04
+    platform: linux/amd64
     container_name: autopwn_ssh
     hostname: ssh-target
     networks:
@@ -47,6 +49,7 @@ services:
   # Root password intentionally empty to simulate CMM Level 1 misconfiguration
   mysql_target:
     image: mysql:5.7
+    platform: linux/amd64
     container_name: autopwn_mysql
     hostname: mysql-target
     networks:
@@ -76,6 +79,7 @@ services:
   # Login: admin / password (DVWA default)
   dvwa_db:
     image: mysql:5.7
+    platform: linux/amd64
     container_name: autopwn_dvwa_db
     hostname: dvwa-db
     networks:
@@ -90,6 +94,7 @@ services:
 
   dvwa_target:
     image: vulnerables/web-dvwa
+    platform: linux/amd64
     container_name: autopwn_dvwa
     hostname: dvwa-target
     networks:
@@ -106,6 +111,7 @@ services:
   # Login: admin / password (intentionally weak)
   wp_db:
     image: mysql:5.7
+    platform: linux/amd64
     container_name: autopwn_wp_db
     hostname: wp-db
     networks:
@@ -141,6 +147,7 @@ services:
   # Anonymous FTP access enabled
   ftp_target:
     image: fauria/vsftpd
+    platform: linux/amd64
     container_name: autopwn_ftp
     hostname: ftp-target
     networks:
@@ -167,6 +174,7 @@ services:
   #       Use the Neutron Lab AD for Kerberoasting tests.
   ldap_target:
     image: osixia/openldap:1.5.0
+    platform: linux/amd64
     container_name: autopwn_ldap
     hostname: ldap-target
     networks:
@@ -189,6 +197,7 @@ services:
   # Tests: enrichment (port 161 UDP), SNMP default community string
   snmp_target:
     image: polinux/snmpd
+    platform: linux/amd64
     container_name: autopwn_snmp
     hostname: snmp-target
     networks:
