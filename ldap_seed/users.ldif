@@ -1,60 +1,74 @@
-# ldap_seed/users.ldif
-# Seed file for OpenLDAP container
-# Simulates a simple AD-like user structure for testing LDAP enumeration
-# Place this file in ./ldap_seed/ next to docker-compose.yml
+# Neutron Corp test users for RIS602 ad_enum.py testing
+# Seed after container start:
+#   ldapadd -x -D "cn=admin,dc=neutron,dc=local" -w adminpass \
+#           -H ldap://localhost:1389 -f ldap_seed/users.ldif
 
-dn: ou=users,dc=neutron,dc=local
+dn: ou=People,dc=neutron,dc=local
 objectClass: organizationalUnit
-ou: users
+ou: People
 
-dn: cn=John Smith,ou=users,dc=neutron,dc=local
+dn: ou=Groups,dc=neutron,dc=local
+objectClass: organizationalUnit
+ou: Groups
+
+dn: uid=administrator,ou=People,dc=neutron,dc=local
 objectClass: inetOrgPerson
 objectClass: posixAccount
-cn: John Smith
-sn: Smith
-givenName: John
-uid: jsmith
-uidNumber: 1001
-gidNumber: 1001
-homeDirectory: /home/jsmith
-mail: jsmith@neutron.local
-userPassword: Password123
-
-dn: cn=Administrator,ou=users,dc=neutron,dc=local
-objectClass: inetOrgPerson
-objectClass: posixAccount
-cn: Administrator
+objectClass: shadowAccount
+uid: administrator
 sn: Administrator
 givenName: Admin
-uid: administrator
-uidNumber: 500
-gidNumber: 500
+cn: Administrator
+displayName: Administrator
+uidNumber: 1000
+gidNumber: 1000
+userPassword: {SSHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g+ArPx
+loginShell: /bin/bash
 homeDirectory: /home/administrator
-mail: admin@neutron.local
-userPassword: Admin123!
+mail: administrator@neutron.local
 
-dn: cn=svc_backup,ou=users,dc=neutron,dc=local
+dn: uid=jsmith,ou=People,dc=neutron,dc=local
 objectClass: inetOrgPerson
 objectClass: posixAccount
-cn: svc_backup
-sn: backup
-givenName: svc
+objectClass: shadowAccount
+uid: jsmith
+sn: Smith
+givenName: John
+cn: John Smith
+displayName: John Smith
+uidNumber: 1001
+gidNumber: 1001
+userPassword: {SSHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g+ArPx
+loginShell: /bin/bash
+homeDirectory: /home/jsmith
+mail: jsmith@neutron.local
+
+dn: uid=svc_backup,ou=People,dc=neutron,dc=local
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
 uid: svc_backup
-uidNumber: 1100
-gidNumber: 1100
+sn: Backup
+givenName: Service
+cn: svc_backup
+displayName: Backup Service Account
+uidNumber: 1002
+gidNumber: 1002
+userPassword: {SSHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g+ArPx
+loginShell: /bin/false
 homeDirectory: /home/svc_backup
 mail: svc_backup@neutron.local
-userPassword: Backup2024!
 
-dn: cn=svc_web,ou=users,dc=neutron,dc=local
-objectClass: inetOrgPerson
-objectClass: posixAccount
-cn: svc_web
-sn: web
-givenName: svc
-uid: svc_web
-uidNumber: 1101
-gidNumber: 1101
-homeDirectory: /home/svc_web
-mail: svc_web@neutron.local
-userPassword: WebService1
+dn: cn=Domain Admins,ou=Groups,dc=neutron,dc=local
+objectClass: posixGroup
+cn: Domain Admins
+gidNumber: 2000
+memberUid: administrator
+
+dn: cn=Domain Users,ou=Groups,dc=neutron,dc=local
+objectClass: posixGroup
+cn: Domain Users
+gidNumber: 2001
+memberUid: administrator
+memberUid: jsmith
+memberUid: svc_backup

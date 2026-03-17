@@ -13,8 +13,10 @@ Usage:
 
 import argparse
 import importlib
+import ipaddress
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -449,10 +451,189 @@ def parse_args() -> argparse.Namespace:
         "--skip-postex", action="store_true",
         help="Skip Stage 7: post-exploitation enumeration",
     )
+    parser.add_argument(
+        "--max-iterations", type=int, default=3, metavar="N",
+        help="Maximum pivot iterations before stopping (default: 3)",
+    )
     return parser.parse_args()
 
 # ---------------------------------------------------------------------------
-# Main pipeline
+# Pivot helpers — extract new attack surface from post-ex output
+# ---------------------------------------------------------------------------
+
+def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]:
+    """
+    Parse post-exploitation command outputs for IP addresses that belong to
+    subnets we have not yet scanned.  Derives a /24 for each new IP found
+    in arp, ip route, ip addr, and ipconfig output.
+
+    Returns a set of CIDR strings (e.g. {"10.10.20.0/24"}).
+    """
+    new_cidrs: set[str] = set()
+    ip_pattern = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+
+    # Collect every string from every command output
+    raw_text = ""
+    for host_entry in postex_data.get("hosts", []):
+        for cmd in host_entry.get("commands_run", []):
+            raw_text += cmd.get("output", "") + "\n"
+
+    for match in ip_pattern.finditer(raw_text):
+        ip_str = match.group(1)
+        try:
+            ip = ipaddress.IPv4Address(ip_str)
+        except ValueError:
+            continue
+        # Skip loopback, link-local, multicast, and broadcast
+        if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.packed[-1] == 255:
+            continue
+        # Derive the /24 containing this IP
+        net = ipaddress.IPv4Network(f"{ip_str}/24", strict=False)
+        cidr_str = str(net)
+        if cidr_str not in known_cidrs:
+            new_cidrs.add(cidr_str)
+
+    return new_cidrs
+
+
+def _snapshot_credentials() -> frozenset[tuple[str, str]]:
+    """
+    Collect all (username, password) pairs across every state file.
+    Returns a frozenset for stable comparison between iterations.
+    """
+    pairs: set[tuple[str, str]] = set()
+    for key in ("ad_findings", "exploitation", "lateral"):
+        data = _load_json(STATE_FILES[key])
+        if not data:
+            continue
+        for c in data.get("cracked_credentials", []):
+            pairs.add((c.get("username", ""), c.get("password", "")))
+        for r in data.get("results", []):
+            for c in r.get("credentials_recovered", []):
+                pairs.add((c.get("username", ""), c.get("password", "")))
+        for e in data.get("reuse_events", []):
+            cred = e.get("credential", {})
+            pairs.add((cred.get("username", ""), cred.get("password", "")))
+    return frozenset(pairs)
+
+
+def _snapshot_hosts() -> frozenset[str]:
+    """Return all host IPs seen across discovery and services state files."""
+    ips: set[str] = set()
+    for key in ("discovery", "services"):
+        data = _load_json(STATE_FILES[key])
+        if not data:
+            continue
+        for h in data.get("hosts", []):
+            ip = h.get("ip")
+            if ip:
+                ips.add(ip)
+    return frozenset(ips)
+
+
+def _merge_discovery(new_cidr: str) -> None:
+    """
+    Merge a new CIDR's discovery results into the existing discovery.json so
+    subsequent stages see all hosts regardless of which iteration found them.
+    """
+    existing = _load_json(STATE_FILES["discovery"]) or {"hosts": []}
+    new_data  = _load_json(STATE_DIR / "discovery_pivot.json") or {"hosts": []}
+
+    existing_ips = {h["ip"] for h in existing.get("hosts", [])}
+    added = 0
+    for h in new_data.get("hosts", []):
+        if h["ip"] not in existing_ips:
+            existing["hosts"].append(h)
+            existing_ips.add(h["ip"])
+            added += 1
+
+    if added:
+        _atomic_write(STATE_FILES["discovery"], existing)
+        ok(f"Merged {added} new host(s) from pivot CIDR {new_cidr} into discovery.json")
+
+
+# ---------------------------------------------------------------------------
+# Single pipeline pass (stages 1-7 for one CIDR)
+# ---------------------------------------------------------------------------
+
+def _run_pass(cidr: str, lhost: str, args: argparse.Namespace,
+              iteration: int, pivot: bool = False) -> None:
+    """
+    Execute stages 1–7 for the given CIDR.
+    When pivot=True the discovery output is written to discovery_pivot.json
+    so it can be merged without overwriting the primary run.
+    """
+    tag = f"iter{iteration}"
+    resume = args.resume and iteration == 1  # only honour --resume on first pass
+
+    # Stages 1 & 2 always re-run for each new CIDR (no checkpoint skip on pivots)
+    def run_discovery():
+        from modules import discovery  # type: ignore
+        result = discovery.run(cidr)
+        if pivot:
+            # Save pivot-specific copy for merging
+            _atomic_write(STATE_DIR / "discovery_pivot.json",
+                          _load_json(STATE_FILES["discovery"]) or {})
+
+    _run_stage(f"Host Discovery [{tag}]", "discovery", run_discovery, resume)
+
+    if pivot:
+        _merge_discovery(cidr)
+
+    def run_enrichment():
+        from modules import enrichment  # type: ignore
+        enrichment.run()
+
+    _run_stage(f"Service Enrichment [{tag}]", "services", run_enrichment, resume)
+
+    def run_ad_enum():
+        from modules import ad_enum  # type: ignore
+        ad_enum.run()
+
+    _run_stage(
+        f"AD Enumeration [{tag}]", "ad_findings", run_ad_enum,
+        resume, skip=args.skip_ad,
+    )
+
+    def run_planner():
+        from modules import planner  # type: ignore
+        planner.run()
+
+    _run_stage(f"Attack Planning [{tag}]", "attack_plan", run_planner, resume)
+
+    # Stage 5
+    attack_plan = _load_json(STATE_FILES["attack_plan"]) or {"attack_paths": []}
+    banner_stage(5, f"Exploitation [{tag}]")
+    tlog("exploitation", f"Stage started [{tag}]", "start")
+    if not (resume and STATE_FILES["exploitation"].exists()):
+        t0 = time.monotonic()
+        try:
+            run_exploits(attack_plan, lhost, DRY_RUN)
+            elapsed = time.monotonic() - t0
+            ok(f"Exploitation completed in {elapsed:.1f}s")
+            tlog("exploitation", f"Stage completed in {elapsed:.1f}s", "success")
+        except Exception as exc:
+            err(f"Exploitation failed: {exc}")
+            tlog("exploitation", f"Stage failed: {exc}", "error")
+
+    def run_reuse():
+        from modules import reuse  # type: ignore
+        reuse.run()
+
+    _run_stage(f"Credential Reuse [{tag}]", "lateral", run_reuse, resume)
+
+    def run_postex():
+        from modules import postex  # type: ignore
+        postex.run()
+
+    _run_stage(
+        f"Post-Exploitation [{tag}]", "postex", run_postex,
+        resume, skip=args.skip_postex,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline — iterative loop
 # ---------------------------------------------------------------------------
 def main() -> None:
     global DRY_RUN
@@ -466,11 +647,9 @@ def main() -> None:
     else:
         cidr = args.target
 
-    # Ensure required directories exist
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Ensure autopwn root is importable as a package prefix
     if str(BASE_DIR) not in sys.path:
         sys.path.insert(0, str(BASE_DIR))
 
@@ -480,109 +659,95 @@ def main() -> None:
     lhost = detect_lhost(cidr)
     info(f"LHOST (outbound interface): {lhost}")
 
-    # ------------------------------------------------------------------
-    # Stage 1: Discovery
-    # ------------------------------------------------------------------
-    def run_discovery():
-        from modules import discovery  # type: ignore
-        discovery.run(cidr)
+    # ── Iterative loop ────────────────────────────────────────────────────────
+    #
+    # Each iteration:
+    #   1. Run stages 1-7 against pending CIDRs
+    #   2. After post-ex, extract new subnets from arp/route/ipconfig output
+    #   3. Compare credential snapshot — new creds trigger a reuse sweep
+    #   4. Stop when: no new hosts found, no new subnets, no new creds,
+    #                 or max_iterations reached
+    #
+    known_cidrs:  set[str]   = {cidr}
+    pending_cidrs: list[str] = [cidr]
+    cred_snapshot = frozenset()
+    host_snapshot = frozenset()
+    iteration = 0
 
-    _run_stage("Host Discovery", "discovery", run_discovery, args.resume)
+    while pending_cidrs and iteration < args.max_iterations:
+        iteration += 1
+        current_cidr = pending_cidrs.pop(0)
+        pivot = (iteration > 1)
 
-    # ------------------------------------------------------------------
-    # Stage 2: Enrichment
-    # ------------------------------------------------------------------
-    def run_enrichment():
-        from modules import enrichment  # type: ignore
-        enrichment.run()
+        bar = "═" * 62
+        print(f"\n{CYAN}{bar}{RESET}")
+        print(f"{BOLD}{CYAN}  ITERATION {iteration}/{args.max_iterations}"
+              f"  —  target: {current_cidr}"
+              f"{'  [PIVOT]' if pivot else ''}{RESET}")
+        print(f"{CYAN}{bar}{RESET}\n")
+        tlog("orchestrator", f"Iteration {iteration} — CIDR: {current_cidr}", "start")
 
-    _run_stage("Service Enrichment", "services", run_enrichment, args.resume)
+        _run_pass(current_cidr, lhost, args, iteration, pivot=pivot)
 
-    # ------------------------------------------------------------------
-    # Stage 3: AD Enumeration (skippable)
-    # ------------------------------------------------------------------
-    def run_ad_enum():
-        from modules import ad_enum  # type: ignore
-        ad_enum.run()
+        # ── What did we gain? ──────────────────────────────────────────────
+        new_host_snapshot = _snapshot_hosts()
+        new_cred_snapshot = _snapshot_credentials()
 
-    _run_stage(
-        "Active Directory Enumeration", "ad_findings", run_ad_enum,
-        args.resume, skip=args.skip_ad,
-    )
+        new_hosts = new_host_snapshot - host_snapshot
+        new_creds = new_cred_snapshot - cred_snapshot
 
-    # ------------------------------------------------------------------
-    # Stage 4: Planner
-    # ------------------------------------------------------------------
-    def run_planner():
-        from modules import planner  # type: ignore
-        planner.run()
+        if new_hosts:
+            ok(f"Iteration {iteration}: {len(new_hosts)} new host(s) discovered")
+        if new_creds:
+            ok(f"Iteration {iteration}: {len(new_creds)} new credential(s) recovered")
 
-    _run_stage("Attack Planning", "attack_plan", run_planner, args.resume)
+        host_snapshot = new_host_snapshot
+        cred_snapshot = new_cred_snapshot
 
-    # ------------------------------------------------------------------
-    # Stage 5: Exploitation
-    # ------------------------------------------------------------------
-    attack_plan = _load_json(STATE_FILES["attack_plan"]) or {"attack_paths": []}
+        # ── Extract pivot subnets from post-ex output ──────────────────────
+        postex_data = _load_json(STATE_FILES["postex"]) or {}
+        pivot_subnets = _extract_pivot_subnets(postex_data, known_cidrs)
 
-    banner_stage(5, "Exploitation")
-    tlog("exploitation", "Stage started", "start")
+        for subnet in sorted(pivot_subnets):
+            warn(f"Pivot target discovered: {subnet}")
+            tlog("orchestrator", f"New pivot subnet: {subnet}", "pivot")
+            known_cidrs.add(subnet)
+            pending_cidrs.append(subnet)
 
-    if _should_skip("exploitation", args.resume):
-        tlog("exploitation", "Skipped — checkpoint exists", "skip")
-    else:
-        t0 = time.monotonic()
-        try:
-            run_exploits(attack_plan, lhost, DRY_RUN)
-            elapsed = time.monotonic() - t0
-            ok(f"Exploitation stage completed in {elapsed:.1f}s")
-            tlog("exploitation", f"Stage completed in {elapsed:.1f}s", "success")
-        except Exception as exc:
-            err(f"Exploitation stage failed: {exc}")
-            tlog("exploitation", f"Stage failed: {exc}", "error")
+        # ── Convergence check ──────────────────────────────────────────────
+        if not pivot_subnets and not new_hosts and not new_creds:
+            ok(f"No new attack surface found after iteration {iteration} — converged.")
+            tlog("orchestrator", "Pipeline converged — no new surface", "converged")
+            break
 
-    # ------------------------------------------------------------------
-    # Stage 6: Credential Reuse
-    # ------------------------------------------------------------------
-    def run_reuse():
-        from modules import reuse  # type: ignore
-        reuse.run()
+    if iteration >= args.max_iterations and pending_cidrs:
+        warn(f"Reached --max-iterations={args.max_iterations} with {len(pending_cidrs)}"
+             f" subnet(s) unexplored: {pending_cidrs}")
+        warn("Re-run with --max-iterations N to continue.")
 
-    _run_stage("Credential Reuse", "lateral", run_reuse, args.resume)
-
-    # ------------------------------------------------------------------
-    # Stage 7: Post-Exploitation (skippable)
-    # ------------------------------------------------------------------
-    def run_postex():
-        from modules import postex  # type: ignore
-        postex.run()
-
-    _run_stage(
-        "Post-Exploitation Enumeration", "postex", run_postex,
-        args.resume, skip=args.skip_postex,
-    )
-
-    # ------------------------------------------------------------------
-    # Stage 8: Report Generation
-    # ------------------------------------------------------------------
+    # ── Stage 8: Report (once, after all iterations) ───────────────────────
     def run_report():
         from modules import report  # type: ignore
         report.run()
 
-    _run_stage("Report Generation", "report", run_report, args.resume)
+    _run_stage("Report Generation", "report", run_report, False)
 
-    # ------------------------------------------------------------------
-    # Pipeline complete
-    # ------------------------------------------------------------------
+    # ── Summary ────────────────────────────────────────────────────────────
     bar = "═" * 62
     print(f"\n{GREEN}{bar}{RESET}")
-    print(f"{BOLD}{GREEN}  Pipeline complete.{RESET}")
+    print(f"{BOLD}{GREEN}  Pipeline complete — {iteration} iteration(s).{RESET}")
+    print(f"  Subnets scanned : {_c(WHITE, ', '.join(sorted(known_cidrs)))}")
+    final_creds = _snapshot_credentials()
+    print(f"  Credentials held: {_c(WHITE, str(len(final_creds)))}")
+    final_hosts = _snapshot_hosts()
+    print(f"  Hosts seen      : {_c(WHITE, str(len(final_hosts)))}")
 
     report_files = sorted(OUTPUT_DIR.glob("report_*.html"))
     if report_files:
         ok(f"Report: {report_files[-1]}")
 
     print(f"{GREEN}{bar}{RESET}\n")
-    tlog("orchestrator", "Pipeline finished", "done")
+    tlog("orchestrator", f"Pipeline finished — {iteration} iteration(s)", "done")
 
 
 if __name__ == "__main__":

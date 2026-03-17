@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ─────────────────────────────────────────────────────────────────────────────
 # RIS602 Autopwn - Incremental Test Environment
 #
@@ -14,6 +12,9 @@ version: "3.9"
 #
 # Network: all containers on 172.28.0.0/24
 # Your Kali will reach them via the docker bridge (no VMs needed)
+#
+# M1/M2/M3 Mac: platform: linux/amd64 forces Rosetta x86 emulation for
+# images that don't publish ARM64 builds. Slightly slower but fully functional.
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
@@ -30,6 +31,7 @@ services:
   # Weak password: root / password123
   ssh_target:
     image: rastasheep/ubuntu-sshd:18.04
+    platform: linux/amd64
     container_name: autopwn_ssh
     hostname: ssh-target
     networks:
@@ -47,11 +49,14 @@ services:
   # Root password intentionally empty to simulate CMM Level 1 misconfiguration
   mysql_target:
     image: mysql:5.7
+    platform: linux/amd64
     container_name: autopwn_mysql
     hostname: mysql-target
     networks:
       autopwn_net:
         ipv4_address: 172.28.0.11
+    ports:
+      - "3306:3306"
     environment:
       MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
       MYSQL_ROOT_PASSWORD: ""
@@ -68,6 +73,8 @@ services:
     networks:
       autopwn_net:
         ipv4_address: 172.28.0.12
+    ports:
+      - "6379:6379"
     command: redis-server --bind 0.0.0.0 --protected-mode no
     restart: unless-stopped
 
@@ -76,6 +83,7 @@ services:
   # Login: admin / password (DVWA default)
   dvwa_db:
     image: mysql:5.7
+    platform: linux/amd64
     container_name: autopwn_dvwa_db
     hostname: dvwa-db
     networks:
@@ -90,6 +98,7 @@ services:
 
   dvwa_target:
     image: vulnerables/web-dvwa
+    platform: linux/amd64
     container_name: autopwn_dvwa
     hostname: dvwa-target
     networks:
@@ -106,6 +115,7 @@ services:
   # Login: admin / password (intentionally weak)
   wp_db:
     image: mysql:5.7
+    platform: linux/amd64
     container_name: autopwn_wp_db
     hostname: wp-db
     networks:
@@ -141,6 +151,7 @@ services:
   # Anonymous FTP access enabled
   ftp_target:
     image: fauria/vsftpd
+    platform: linux/amd64
     container_name: autopwn_ftp
     hostname: ftp-target
     networks:
@@ -167,11 +178,14 @@ services:
   #       Use the Neutron Lab AD for Kerberoasting tests.
   ldap_target:
     image: osixia/openldap:1.5.0
+    platform: linux/amd64
     container_name: autopwn_ldap
     hostname: ldap-target
     networks:
       autopwn_net:
         ipv4_address: 172.28.0.40
+    ports:
+      - "1389:389"    # 389 is privileged on macOS; use localhost:1389 for testing
     environment:
       LDAP_ORGANISATION: "Neutron Corp"
       LDAP_DOMAIN: "neutron.local"
@@ -180,15 +194,15 @@ services:
       LDAP_READONLY_USER_USERNAME: "readonly"
       LDAP_READONLY_USER_PASSWORD: "readonly"
       # Allow anonymous bind for testing
-      LDAP_REMOVE_CONFIG_AFTER_SETUP: "true"
-    volumes:
-      - ./ldap_seed:/container/service/slapd/assets/config/bootstrap/ldif/custom
+      LDAP_REMOVE_CONFIG_AFTER_SETUP: "false"
+      LDAP_TLS: "false"
     restart: unless-stopped
 
   # ── SNMP TARGET ──────────────────────────────────────────────────────────────
   # Tests: enrichment (port 161 UDP), SNMP default community string
   snmp_target:
     image: polinux/snmpd
+    platform: linux/amd64
     container_name: autopwn_snmp
     hostname: snmp-target
     networks:

@@ -6,21 +6,38 @@
   Interface mapping (VirtualBox adapter -> pfSense vtnet -> role)
     vtnet0   WAN    NAT adapter added automatically by Vagrant, outbound only
     vtnet1   LAN    host-only / mgmt    172.16.99.1/24
-    vtnet2   OPT1   neutron-vlan10      172.16.10.1/24  DC segment
-    vtnet3   OPT2   neutron-vlan20      172.16.20.1/24  web/server segment
-    vtnet4   OPT3   neutron-vlan30      172.16.30.1/24  attacker segment
+    vtnet2   OPT1   neutron-vlan10      172.16.10.1/24  Internal (DC, workstations)
+    vtnet3   OPT2   neutron-vlan20      172.16.20.1/24  Server / container host
+    vtnet4   OPT3   neutron-vlan30      172.16.30.1/24  DMZ (pubdns, jumpbox, VPN)
+    vtnet5   OPT4   neutron-vlan40      172.16.40.1/24  External simulation (kali, remoteuser)
 
-  Firewall policy (top-to-bottom, first match wins)
-    vlan30 to vlan10 tcp/445    BLOCK  no direct SMB from attacker to DC
-    vlan30 to vlan10 tcp/88     ALLOW  Kerberos (AS-REP roasting / TGT)
-    vlan30 to vlan10 tcp/389    ALLOW  LDAP enumeration
-    vlan30 to vlan10 tcp/636    ALLOW  LDAPS enumeration
-    vlan30 to vlan20 any        ALLOW  attacker reaches all web/server services
-    vlan20 to vlan10 any        ALLOW  web servers authenticate to AD
-    any    to WAN   any         ALLOW  outbound internet via NAT
+  Firewall policy (top-to-bottom, first match wins — per PROGRESS.md design)
+
+  VLAN40 rules (External simulation — kali, remoteuser):
+    vlan40 to vlan20 tcp/8069,9000,9443  BLOCK  Internal apps not exposed externally
+    vlan40 to vlan10 any                 BLOCK  External cannot reach AD
+    vlan40 to vlan30 udp/1194            ALLOW  VPN connect to vpn.neutron.local
+    vlan40 to vlan20 tcp/80,443,8080,8443 ALLOW Public web sites
+    vlan40 to WAN    any                 ALLOW  Internet access
+
+  VLAN30 rules (DMZ — pubdns, jumpbox, vpn server):
+    vlan30 vpn-server to vlan10 any      ALLOW  VPN-NATed client traffic to internal
+    vlan30 to vlan20 tcp/8069,9000,9443  BLOCK  Internal apps from DMZ
+    vlan30 to vlan10 any                 BLOCK  DMZ cannot reach AD directly
+    vlan30 to vlan20 tcp/80,443,8080,8443 ALLOW DMZ reaches public web
+    vlan30 to WAN    any                 ALLOW  DMZ outbound
+
+  VLAN20 rules (Server):
+    vlan20 to vlan10 tcp/88,389,445,636  ALLOW  Container host auths to AD
+
+  VLAN10 rules (Internal):
+    vlan10 to any    any                 ALLOW  Internal full access
+
+  LAN (mgmt):
+    lan    to any    any                 ALLOW  Host management
 
   DHCP disabled on all interfaces. Static IPs set by shell provisioners.
-  DNS forwarder forwards neutron.local queries to dc01 at 172.16.10.10.
+  DNS forwarder resolves neutron.local via privdns (172.16.10.53).
 -->
 <pfsense>
 
@@ -87,14 +104,23 @@
       <subnet>24</subnet>
     </opt2>
 
-    <!-- OPT3: vtnet4, vlan30 attacker segment, 172.16.30.1/24 -->
+    <!-- OPT3: vtnet4, vlan30 DMZ segment, 172.16.30.1/24 -->
     <opt3>
       <enable/>
       <if>vtnet4</if>
-      <descr>VLAN30_ATK</descr>
+      <descr>VLAN30_DMZ</descr>
       <ipaddr>172.16.30.1</ipaddr>
       <subnet>24</subnet>
     </opt3>
+
+    <!-- OPT4: vtnet5, vlan40 external simulation segment, 172.16.40.1/24 -->
+    <opt4>
+      <enable/>
+      <if>vtnet5</if>
+      <descr>VLAN40_EXT</descr>
+      <ipaddr>172.16.40.1</ipaddr>
+      <subnet>24</subnet>
+    </opt4>
 
   </interfaces>
 
@@ -104,17 +130,18 @@
     <opt1/>
     <opt2/>
     <opt3/>
+    <opt4/>
   </dhcpd>
 
-  <!-- DNS forwarder: resolves neutron.local via dc01, everything else via 8.8.8.8 -->
+  <!-- DNS forwarder: resolves neutron.local via privdns (172.16.10.53), rest via 8.8.8.8 -->
   <dnsmasq>
     <enable/>
     <regdhcpstatic/>
     <domainoverrides>
       <domainoverride>
         <domain>neutron.local</domain>
-        <ip>172.16.10.10</ip>
-        <descr>DC01 authoritative DNS for neutron.local</descr>
+        <ip>172.16.10.53</ip>
+        <descr>privdns authoritative DNS for neutron.local</descr>
       </domainoverride>
     </domainoverrides>
   </dnsmasq>
@@ -126,12 +153,215 @@
     </outbound>
   </nat>
 
-  <!-- Firewall rules -->
+  <!-- Firewall rules — new topology (first match wins) -->
   <filter>
 
-    <!-- RULE 1: vlan30 to vlan10 tcp/445 BLOCK
-         No direct SMB from the attacker VLAN to the domain controller.
-         Must appear before the general ALLOW rules to take precedence. -->
+    <!-- ================================================================
+         VLAN40 (External simulation — kali, remoteuser) rules
+         ================================================================ -->
+
+    <!-- RULE V40-1: BLOCK vlan40 to vlan20 tcp/8069,9000,9443
+         Internal apps (Odoo, Nextcloud) not reachable from external.
+         Must precede the public web ALLOW rule. -->
+    <rule>
+      <type>block</type>
+      <interface>opt4</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt4</network>
+      </source>
+      <destination>
+        <network>opt2</network>
+        <port>8069:8069</port>
+      </destination>
+      <descr>BLOCK vlan40 to Odoo port 8069</descr>
+    </rule>
+
+    <rule>
+      <type>block</type>
+      <interface>opt4</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt4</network>
+      </source>
+      <destination>
+        <network>opt2</network>
+        <port>9000:9000</port>
+      </destination>
+      <descr>BLOCK vlan40 to Nextcloud port 9000</descr>
+    </rule>
+
+    <rule>
+      <type>block</type>
+      <interface>opt4</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt4</network>
+      </source>
+      <destination>
+        <network>opt2</network>
+        <port>9443:9443</port>
+      </destination>
+      <descr>BLOCK vlan40 to Nextcloud port 9443</descr>
+    </rule>
+
+    <!-- RULE V40-2: BLOCK vlan40 to vlan10 any
+         External simulation segment cannot reach AD, workstations, or internal DNS.
+         Must precede the WAN ALLOW rule. -->
+    <rule>
+      <type>block</type>
+      <interface>opt4</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <network>opt4</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+      </destination>
+      <descr>BLOCK vlan40 to vlan10 internal segment</descr>
+    </rule>
+
+    <!-- RULE V40-3: ALLOW vlan40 to vlan30 udp/1194 (VPN connect)
+         Permits kali/remoteuser to connect to vpn.neutron.local (172.16.30.30). -->
+    <rule>
+      <type>pass</type>
+      <interface>opt4</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>udp</protocol>
+      <source>
+        <network>opt4</network>
+      </source>
+      <destination>
+        <network>opt3</network>
+        <port>1194</port>
+      </destination>
+      <descr>ALLOW vlan40 VPN connect to vlan30 udp1194</descr>
+    </rule>
+
+    <!-- RULE V40-4: ALLOW vlan40 to vlan20 tcp/80,443,8080,8443
+         Permits external access to public web services on container host.
+         corpweb (80/443) and esite (8080/8443) are publicly reachable. -->
+    <rule>
+      <type>pass</type>
+      <interface>opt4</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt4</network>
+      </source>
+      <destination>
+        <network>opt2</network>
+        <port>80:80</port>
+      </destination>
+      <descr>ALLOW vlan40 to vlan20 HTTP port 80</descr>
+    </rule>
+
+    <rule>
+      <type>pass</type>
+      <interface>opt4</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt4</network>
+      </source>
+      <destination>
+        <network>opt2</network>
+        <port>443:443</port>
+      </destination>
+      <descr>ALLOW vlan40 to vlan20 HTTPS port 443</descr>
+    </rule>
+
+    <rule>
+      <type>pass</type>
+      <interface>opt4</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt4</network>
+      </source>
+      <destination>
+        <network>opt2</network>
+        <port>8080:8080</port>
+      </destination>
+      <descr>ALLOW vlan40 to vlan20 esite HTTP port 8080</descr>
+    </rule>
+
+    <rule>
+      <type>pass</type>
+      <interface>opt4</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt4</network>
+      </source>
+      <destination>
+        <network>opt2</network>
+        <port>8443:8443</port>
+      </destination>
+      <descr>ALLOW vlan40 to vlan20 esite HTTPS port 8443</descr>
+    </rule>
+
+    <!-- RULE V40-5: ALLOW vlan40 outbound to WAN (internet access) -->
+    <rule>
+      <type>pass</type>
+      <interface>opt4</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <network>opt4</network>
+      </source>
+      <destination>
+        <any/>
+      </destination>
+      <descr>ALLOW vlan40 outbound internet access</descr>
+    </rule>
+
+    <!-- ================================================================
+         VLAN30 (DMZ — pubdns, jumpbox, VPN server) rules
+         ================================================================ -->
+
+    <!-- RULE V30-1: ALLOW vpn-server (172.16.30.30) to vlan10 any
+         VPN server NATMASQUERADEs VPN client traffic (10.8.0.0/24) through
+         its eth1 IP. pfSense sees this traffic as coming from 172.16.30.30.
+         This rule allows VPN-connected clients (kali after VPN) to reach AD. -->
+    <rule>
+      <type>pass</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <address>172.16.30.30</address>
+      </source>
+      <destination>
+        <network>opt1</network>
+      </destination>
+      <descr>ALLOW vpn-server NATed traffic to vlan10 (VPN pivot path)</descr>
+    </rule>
+
+    <!-- RULE V30-1b: ALLOW vpn-server (172.16.30.30) to vlan20 any
+         VPN-connected kali (NATed through vpn server) needs ALL vlan20 ports:
+         Odoo :8069, Nextcloud :9000, MySQL :3306, Redis :6379, NFS :2049.
+         Must precede the BLOCK rules below (first-match wins). -->
+    <rule>
+      <type>pass</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <address>172.16.30.30</address>
+      </source>
+      <destination>
+        <network>opt2</network>
+      </destination>
+      <descr>ALLOW vpn-server NATed traffic to vlan20 all ports (VPN pivot)</descr>
+    </rule>
+
+    <!-- RULE V30-2: BLOCK vlan30 to vlan20 tcp/8069,9000,9443
+         Internal apps not reachable from DMZ (except via VPN pivot above). -->
     <rule>
       <type>block</type>
       <interface>opt3</interface>
@@ -141,14 +371,43 @@
         <network>opt3</network>
       </source>
       <destination>
-        <network>opt1</network>
-        <port>445</port>
+        <network>opt2</network>
+        <port>8069:8069</port>
       </destination>
-      <descr>BLOCK attacker SMB to DC vlan30 to vlan10 tcp445</descr>
+      <descr>BLOCK vlan30 DMZ to Odoo port 8069</descr>
     </rule>
 
-    <!-- RULE 2: vlan30 to vlan10 tcp/88 ALLOW (Kerberos)
-         Permits AS-REP roasting and TGT requests from Kali. -->
+    <rule>
+      <type>block</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt3</network>
+      </source>
+      <destination>
+        <network>opt2</network>
+        <port>9000:9443</port>
+      </destination>
+      <descr>BLOCK vlan30 DMZ to Nextcloud ports 9000-9443</descr>
+    </rule>
+
+    <!-- RULE V30-3: BLOCK vlan30 to vlan10 any (except VPN server — above) -->
+    <rule>
+      <type>block</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>any</protocol>
+      <source>
+        <network>opt3</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+      </destination>
+      <descr>BLOCK vlan30 DMZ to vlan10 internal (VPN server handled by prior rule)</descr>
+    </rule>
+
+    <!-- RULE V30-4: ALLOW vlan30 to vlan20 tcp/80,443,8080,8443 -->
     <rule>
       <type>pass</type>
       <interface>opt3</interface>
@@ -158,14 +417,12 @@
         <network>opt3</network>
       </source>
       <destination>
-        <network>opt1</network>
-        <port>88</port>
+        <network>opt2</network>
+        <port>80:80</port>
       </destination>
-      <descr>ALLOW attacker Kerberos to DC vlan30 to vlan10 tcp88</descr>
+      <descr>ALLOW vlan30 DMZ to vlan20 HTTP 80</descr>
     </rule>
 
-    <!-- RULE 3: vlan30 to vlan10 tcp/389 ALLOW (LDAP)
-         Permits anonymous bind and enumeration via ldap3. -->
     <rule>
       <type>pass</type>
       <interface>opt3</interface>
@@ -175,14 +432,12 @@
         <network>opt3</network>
       </source>
       <destination>
-        <network>opt1</network>
-        <port>389</port>
+        <network>opt2</network>
+        <port>443:443</port>
       </destination>
-      <descr>ALLOW attacker LDAP to DC vlan30 to vlan10 tcp389</descr>
+      <descr>ALLOW vlan30 DMZ to vlan20 HTTPS 443</descr>
     </rule>
 
-    <!-- RULE 4: vlan30 to vlan10 tcp/636 ALLOW (LDAPS)
-         Permits TLS LDAP enumeration (ldap3 auto-negotiate). -->
     <rule>
       <type>pass</type>
       <interface>opt3</interface>
@@ -192,15 +447,28 @@
         <network>opt3</network>
       </source>
       <destination>
-        <network>opt1</network>
-        <port>636</port>
+        <network>opt2</network>
+        <port>8080:8080</port>
       </destination>
-      <descr>ALLOW attacker LDAPS to DC vlan30 to vlan10 tcp636</descr>
+      <descr>ALLOW vlan30 DMZ to vlan20 esite 8080</descr>
     </rule>
 
-    <!-- RULE 5: vlan30 to vlan20 ALLOW all
-         Attacker can reach HTTP (80/443), MySQL (3306), Redis (6379),
-         SMB (445), SSH (22), FTP (21), SNMP (161) on web/server segment. -->
+    <rule>
+      <type>pass</type>
+      <interface>opt3</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt3</network>
+      </source>
+      <destination>
+        <network>opt2</network>
+        <port>8443:8443</port>
+      </destination>
+      <descr>ALLOW vlan30 DMZ to vlan20 esite HTTPS 8443</descr>
+    </rule>
+
+    <!-- RULE V30-5: ALLOW vlan30 outbound to WAN -->
     <rule>
       <type>pass</type>
       <interface>opt3</interface>
@@ -210,13 +478,78 @@
         <network>opt3</network>
       </source>
       <destination>
-        <network>opt2</network>
+        <any/>
       </destination>
-      <descr>ALLOW attacker to web-server segment vlan30 to vlan20 all</descr>
+      <descr>ALLOW vlan30 DMZ outbound to WAN</descr>
     </rule>
 
-    <!-- RULE 6: vlan20 to vlan10 ALLOW all
-         Web servers and DB hosts authenticate to AD (Kerberos, LDAP, DNS). -->
+    <!-- ================================================================
+         VLAN20 (Server / container host) rules
+         ================================================================ -->
+
+    <!-- RULE V20-1: ALLOW vlan20 to vlan10 AD ports
+         Container host authenticates to AD: Kerberos, LDAP, LDAPS, SMB. -->
+    <rule>
+      <type>pass</type>
+      <interface>opt2</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt2</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+        <port>88:88</port>
+      </destination>
+      <descr>ALLOW vlan20 to vlan10 Kerberos tcp88</descr>
+    </rule>
+
+    <rule>
+      <type>pass</type>
+      <interface>opt2</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt2</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+        <port>389:389</port>
+      </destination>
+      <descr>ALLOW vlan20 to vlan10 LDAP tcp389</descr>
+    </rule>
+
+    <rule>
+      <type>pass</type>
+      <interface>opt2</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt2</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+        <port>445:445</port>
+      </destination>
+      <descr>ALLOW vlan20 to vlan10 SMB tcp445</descr>
+    </rule>
+
+    <rule>
+      <type>pass</type>
+      <interface>opt2</interface>
+      <ipprotocol>inet</ipprotocol>
+      <protocol>tcp</protocol>
+      <source>
+        <network>opt2</network>
+      </source>
+      <destination>
+        <network>opt1</network>
+        <port>636:636</port>
+      </destination>
+      <descr>ALLOW vlan20 to vlan10 LDAPS tcp636</descr>
+    </rule>
+
+    <!-- RULE V20-2: ALLOW vlan20 outbound to WAN -->
     <rule>
       <type>pass</type>
       <interface>opt2</interface>
@@ -226,13 +559,16 @@
         <network>opt2</network>
       </source>
       <destination>
-        <network>opt1</network>
+        <any/>
       </destination>
-      <descr>ALLOW web-server segment to DC vlan20 to vlan10 all</descr>
+      <descr>ALLOW vlan20 outbound to WAN (apt, pip during provisioning)</descr>
     </rule>
 
-    <!-- RULE 7a: vlan10 outbound to WAN
-         Domain controller can pull Windows updates and resolve external DNS. -->
+    <!-- ================================================================
+         VLAN10 (Internal — DC, workstations, privdns) rules
+         ================================================================ -->
+
+    <!-- RULE V10-1: ALLOW vlan10 any — full internal access -->
     <rule>
       <type>pass</type>
       <interface>opt1</interface>
@@ -244,43 +580,14 @@
       <destination>
         <any/>
       </destination>
-      <descr>ALLOW vlan10 outbound to WAN</descr>
+      <descr>ALLOW vlan10 internal full outbound access</descr>
     </rule>
 
-    <!-- RULE 7b: vlan20 outbound to WAN
-         Web/server hosts can pull packages (apt, pip) during provisioning. -->
-    <rule>
-      <type>pass</type>
-      <interface>opt2</interface>
-      <ipprotocol>inet</ipprotocol>
-      <protocol>any</protocol>
-      <source>
-        <network>opt2</network>
-      </source>
-      <destination>
-        <any/>
-      </destination>
-      <descr>ALLOW vlan20 outbound to WAN</descr>
-    </rule>
+    <!-- ================================================================
+         LAN / mgmt rules
+         ================================================================ -->
 
-    <!-- RULE 7c: vlan30 outbound to WAN
-         Kali can pull tool updates and download payload stagers. -->
-    <rule>
-      <type>pass</type>
-      <interface>opt3</interface>
-      <ipprotocol>inet</ipprotocol>
-      <protocol>any</protocol>
-      <source>
-        <network>opt3</network>
-      </source>
-      <destination>
-        <any/>
-      </destination>
-      <descr>ALLOW vlan30 outbound to WAN</descr>
-    </rule>
-
-    <!-- RULE 8: mgmt LAN to any ALLOW
-         Vagrant host (via host-only adapter) reaches all VMs for management. -->
+    <!-- RULE LAN-1: ALLOW mgmt to any — host management -->
     <rule>
       <type>pass</type>
       <interface>lan</interface>
@@ -300,31 +607,49 @@
   <!-- Static routes: none required; connected routes generated from interface IPs -->
   <staticroutes/>
 
-  <!-- Aliases: named address objects referenced by rule descriptions -->
+  <!-- Aliases: named address objects -->
   <aliases>
     <alias>
-      <name>VLAN10_DC_NET</name>
+      <name>VLAN10_INTERNAL</name>
       <type>network</type>
       <address>172.16.10.0/24</address>
-      <descr>DC and DNS segment</descr>
+      <descr>Internal segment: DC, workstations, privdns</descr>
     </alias>
     <alias>
-      <name>VLAN20_WEB_NET</name>
+      <name>VLAN20_SERVER</name>
       <type>network</type>
       <address>172.16.20.0/24</address>
-      <descr>Web and server segment</descr>
+      <descr>Server segment: containers (web/db/nfs)</descr>
     </alias>
     <alias>
-      <name>VLAN30_ATK_NET</name>
+      <name>VLAN30_DMZ</name>
       <type>network</type>
       <address>172.16.30.0/24</address>
-      <descr>Attacker and VPN segment</descr>
+      <descr>DMZ segment: pubdns, jumpbox, VPN server</descr>
+    </alias>
+    <alias>
+      <name>VLAN40_EXTERNAL</name>
+      <type>network</type>
+      <address>172.16.40.0/24</address>
+      <descr>External simulation: kali, remoteuser</descr>
     </alias>
     <alias>
       <name>DC01</name>
       <type>host</type>
       <address>172.16.10.10</address>
       <descr>Domain controller dc01.neutron.local</descr>
+    </alias>
+    <alias>
+      <name>VPN_SERVER</name>
+      <type>host</type>
+      <address>172.16.30.30</address>
+      <descr>VPN server vpn.neutron.local — NATMASQs VPN client traffic</descr>
+    </alias>
+    <alias>
+      <name>CONTAINERS</name>
+      <type>host</type>
+      <address>172.16.20.10</address>
+      <descr>Container host — all web/db services</descr>
     </alias>
   </aliases>
 

@@ -13,10 +13,10 @@ set -euo pipefail
 log() { echo "[vpn] $(date +%H:%M:%S) $*"; }
 
 IFACE="eth1"
-IP="172.16.30.10"
+IP="${HOST_IP:-172.16.30.30}"
 PREFIX="24"
-GATEWAY="172.16.30.1"
-DNS="172.16.10.10"
+GATEWAY="${VLAN30_GW:-172.16.30.1}"
+DNS="${PRIVDNS_IP:-172.16.10.53}"
 HOSTNAME="vpn.neutron.local"
 
 EASYRSA_DIR="/etc/openvpn/easy-rsa"
@@ -47,6 +47,10 @@ network:
         - ${IP}/${PREFIX}
       routes:
         - to: default
+          via: ${GATEWAY}
+        - to: 172.16.10.0/24
+          via: ${GATEWAY}
+        - to: 172.16.20.0/24
           via: ${GATEWAY}
       nameservers:
         addresses: [${DNS}]
@@ -133,6 +137,7 @@ server 10.8.0.0 255.255.255.0
 push "route 172.16.10.0 255.255.255.0"
 push "route 172.16.20.0 255.255.255.0"
 push "route 172.16.30.0 255.255.255.0"
+# Push privdns as DNS so VPN clients can resolve neutron.local
 push "dhcp-option DNS ${DNS}"
 
 # Keepalive / housekeeping
@@ -159,22 +164,22 @@ if [[ ! -f "${SYSCTL_CONF}" ]]; then
 fi
 sysctl -p "${SYSCTL_CONF}" 2>/dev/null || true
 
-# Determine the outbound (non-VPN) interface — typically eth0 under Vagrant
-OUTBOUND_IFACE="$(ip route | awk '/default/ {print $5; exit}')"
-log "NAT masquerade outbound via ${OUTBOUND_IFACE}"
+# NAT masquerade VPN client traffic (10.8.0.0/24) through IFACE (eth1/VLAN30).
+# This makes pfSense see traffic as coming from 172.16.30.30, enabling the
+# VPN pivot path: pfSense rule V30-1 allows 172.16.30.30 to reach VLAN10/20.
+# IMPORTANT: must use IFACE (eth1), NOT the default-route interface (eth0).
+log "NAT masquerade outbound via ${IFACE} (VLAN30 — pfSense sees 172.16.30.30)"
 
-# iptables-persistent: apply rules idempotently
 RULES_FILE="/etc/iptables/rules.v4"
-# Only insert the rule if it is not already present
-if ! iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o "${OUTBOUND_IFACE}" -j MASQUERADE 2>/dev/null; then
-    iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "${OUTBOUND_IFACE}" -j MASQUERADE
+if ! iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o "${IFACE}" -j MASQUERADE 2>/dev/null; then
+    iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "${IFACE}" -j MASQUERADE
 fi
-if ! iptables -C FORWARD -i tun0 -o "${OUTBOUND_IFACE}" -j ACCEPT 2>/dev/null; then
-    iptables -A FORWARD -i tun0 -o "${OUTBOUND_IFACE}" -j ACCEPT
+if ! iptables -C FORWARD -i tun0 -o "${IFACE}" -j ACCEPT 2>/dev/null; then
+    iptables -A FORWARD -i tun0 -o "${IFACE}" -j ACCEPT
 fi
-if ! iptables -C FORWARD -i "${OUTBOUND_IFACE}" -o tun0 -m state \
+if ! iptables -C FORWARD -i "${IFACE}" -o tun0 -m state \
         --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
-    iptables -A FORWARD -i "${OUTBOUND_IFACE}" -o tun0 \
+    iptables -A FORWARD -i "${IFACE}" -o tun0 \
         -m state --state RELATED,ESTABLISHED -j ACCEPT
 fi
 
@@ -226,7 +231,7 @@ cat > "${CLIENT_STAGING}/client1.ovpn" <<OVPN
 client
 dev tun
 proto udp
-remote vpn.neutron.local 1194
+remote ${IP} 1194
 resolv-retry infinite
 nobind
 
