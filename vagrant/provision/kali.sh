@@ -13,10 +13,11 @@ log()  { echo "[kali] $(date +%H:%M:%S) $*"; }
 warn() { echo "[kali] WARNING: $*" >&2; }
 
 IFACE="eth1"
-IP="172.16.30.50"
+IP="${HOST_IP:-172.16.40.50}"
 PREFIX="24"
-GATEWAY="172.16.30.1"
-DNS="172.16.10.10"
+GATEWAY="${VLAN40_GW:-172.16.40.1}"
+# Before VPN: use pubdns (NXDOMAIN for internal). After VPN: privdns is pushed.
+DNS="${PUBDNS_IP:-172.16.30.10}"
 HOSTNAME="kali.neutron.local"
 
 DC_CERT_URL="http://172.16.10.10/certs/neutron-root-ca.cer"
@@ -248,8 +249,10 @@ fi
 log "Adding Neutron lab hosts to /etc/hosts"
 declare -A LAB_HOSTS=(
     ["172.16.10.10"]="dc01.neutron.local dc01"
-    ["172.16.20.14"]="esite.neutron.local esite"
-    ["172.16.30.10"]="vpn.neutron.local vpn"
+    ["172.16.20.10"]="containers.neutron.local corpweb.neutron.local containers"
+    ["172.16.30.10"]="pubdns.neutron.local pubdns"
+    ["172.16.30.20"]="jumpbox.neutron.local jumpbox"
+    ["172.16.30.30"]="vpn.neutron.local vpn"
 )
 for ip in "${!LAB_HOSTS[@]}"; do
     hostnames="${LAB_HOSTS[$ip]}"
@@ -267,7 +270,7 @@ cat > "${AUTOPWN_DEST}/run_tests.sh" <<'TESTSCRIPT'
 # =============================================================================
 # run_tests.sh — Quick smoke tests for the autopwn pipeline
 # Run from /opt/autopwn as root after provisioning is complete.
-# Targets: esite.neutron.local (172.16.20.14)
+# Targets: esite.neutron.local (172.16.20.10)
 # =============================================================================
 set -uo pipefail
 
@@ -307,12 +310,12 @@ run_test "import database exploit" "python3 -c 'from modules.exploits.database i
 run_test "import web exploit"      "python3 -c 'from modules.exploits.web import exploit_dvwa, exploit_wordpress'"
 
 echo ""
-echo "--- Live service tests against 172.16.20.14 ---"
+echo "--- Live service tests against 172.16.20.10 ---"
 
 run_test "Redis exploit (esite :6379)" \
     "python3 -c \"
 from modules.exploits.database import exploit_redis
-r = exploit_redis('172.16.20.14')
+r = exploit_redis('172.16.20.10')
 assert r.get('success'), f'Redis failed: {r}'
 print(r.get('evidence',''))
 \""
@@ -320,7 +323,7 @@ print(r.get('evidence',''))
 run_test "MySQL exploit (esite :3306)" \
     "python3 -c \"
 from modules.exploits.database import exploit_mysql
-r = exploit_mysql('172.16.20.14')
+r = exploit_mysql('172.16.20.10')
 assert r.get('success'), f'MySQL failed: {r}'
 print(r.get('evidence',''))
 \""

@@ -13,10 +13,10 @@ set -euo pipefail
 log() { echo "[vpn] $(date +%H:%M:%S) $*"; }
 
 IFACE="eth1"
-IP="172.16.30.10"
+IP="${HOST_IP:-172.16.30.30}"
 PREFIX="24"
-GATEWAY="172.16.30.1"
-DNS="172.16.10.10"
+GATEWAY="${VLAN30_GW:-172.16.30.1}"
+DNS="${PRIVDNS_IP:-172.16.10.53}"
 HOSTNAME="vpn.neutron.local"
 
 EASYRSA_DIR="/etc/openvpn/easy-rsa"
@@ -133,6 +133,7 @@ server 10.8.0.0 255.255.255.0
 push "route 172.16.10.0 255.255.255.0"
 push "route 172.16.20.0 255.255.255.0"
 push "route 172.16.30.0 255.255.255.0"
+# Push privdns as DNS so VPN clients can resolve neutron.local
 push "dhcp-option DNS ${DNS}"
 
 # Keepalive / housekeeping
@@ -226,7 +227,7 @@ cat > "${CLIENT_STAGING}/client1.ovpn" <<OVPN
 client
 dev tun
 proto udp
-remote vpn.neutron.local 1194
+remote ${IP} 1194
 resolv-retry infinite
 nobind
 

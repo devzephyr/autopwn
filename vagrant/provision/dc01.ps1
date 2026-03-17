@@ -176,18 +176,32 @@ if ($pass -eq 2) {
     $dnsZone = "neutron.local"
 
     $records = @{
+        # VLAN10 — Internal
         "dc01"        = "172.16.10.10"
-        "corpweb"     = "172.16.20.11"
-        "intweb"      = "172.16.20.12"
-        "filesharing" = "172.16.20.13"
-        "esite"       = "172.16.20.14"
-        "vpn"         = "172.16.30.10"
-        "kali"        = "172.16.30.50"
-        "www"         = "172.16.20.11"
+        "adminws"     = "172.16.10.20"
+        "userws"      = "172.16.10.21"
+        "privdns"     = "172.16.10.53"
         "mail"        = "172.16.10.10"
-        "files"       = "172.16.20.13"
-        "shop"        = "172.16.20.14"
-        "remote"      = "172.16.30.10"
+
+        # VLAN20 — Container host (all services on one IP)
+        "containers"  = "172.16.20.10"
+        "corpweb"     = "172.16.20.10"
+        "esite"       = "172.16.20.10"
+        "odoo"        = "172.16.20.10"
+        "nextcloud"   = "172.16.20.10"
+        "www"         = "172.16.20.10"
+        "shop"        = "172.16.20.10"
+        "files"       = "172.16.20.10"
+
+        # VLAN30 — DMZ
+        "pubdns"      = "172.16.30.10"
+        "jumpbox"     = "172.16.30.20"
+        "vpn"         = "172.16.30.30"
+        "remote"      = "172.16.30.30"
+
+        # VLAN40 — External (reachable internally after VPN pivot)
+        "kali"        = "172.16.40.50"
+        "remoteuser"  = "172.16.40.10"
     }
 
     foreach ($name in $records.Keys) {
