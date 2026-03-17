@@ -55,6 +55,8 @@ services:
     networks:
       autopwn_net:
         ipv4_address: 172.28.0.11
+    ports:
+      - "3306:3306"
     environment:
       MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
       MYSQL_ROOT_PASSWORD: ""
@@ -71,6 +73,8 @@ services:
     networks:
       autopwn_net:
         ipv4_address: 172.28.0.12
+    ports:
+      - "6379:6379"
     command: redis-server --bind 0.0.0.0 --protected-mode no
     restart: unless-stopped
 
@@ -180,6 +184,8 @@ services:
     networks:
       autopwn_net:
         ipv4_address: 172.28.0.40
+    ports:
+      - "389:389"
     environment:
       LDAP_ORGANISATION: "Neutron Corp"
       LDAP_DOMAIN: "neutron.local"
