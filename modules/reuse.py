@@ -62,12 +62,22 @@ def _port_open(host_entry: dict, port: int) -> bool:
 
 def _is_windows(host_entry: dict) -> bool:
     guess = (host_entry.get("os_guess") or "").lower()
-    return any(k in guess for k in _WINDOWS_KEYWORDS)
+    if any(k in guess for k in _WINDOWS_KEYWORDS):
+        return True
+    # Fallback: SMB open without SSH strongly implies Windows
+    if _port_open(host_entry, PORT_SMB) and not _port_open(host_entry, PORT_SSH):
+        return True
+    return False
 
 
 def _is_linux(host_entry: dict) -> bool:
     guess = (host_entry.get("os_guess") or "").lower()
-    return any(k in guess for k in _LINUX_KEYWORDS)
+    if any(k in guess for k in _LINUX_KEYWORDS):
+        return True
+    # Fallback: SSH open without SMB strongly implies Linux/Unix
+    if _port_open(host_entry, PORT_SSH) and not _port_open(host_entry, PORT_SMB):
+        return True
+    return False
 
 
 def _is_database_host(host_entry: dict) -> bool:
