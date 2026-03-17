@@ -211,36 +211,55 @@ def ldap_anonymous_enum(dc_ip: str, domain: str, port: int = 389) -> dict:
         _log(f"  LDAP connection error: {exc}")
         return result
 
-    try:
-        ok = conn.search(
-            base_dn,
-            "(objectClass=user)",
-            search_scope=SUBTREE,
-            attributes=["sAMAccountName", "userPrincipalName", "memberOf", "userAccountControl"],
-            time_limit=30,
-            size_limit=500,
-        )
-    except LDAPException as exc:
-        result["error"] = f"LDAP search failed: {exc}"
-        _log(f"  LDAP search error: {exc}")
-        conn.unbind()
-        return result
+    # Try AD filter first, fall back to RFC-2307/OpenLDAP filter
+    search_attempts = [
+        ("(objectClass=user)",          ["sAMAccountName", "userPrincipalName", "memberOf", "userAccountControl"]),
+        ("(objectClass=inetOrgPerson)", ["uid", "cn", "mail"]),
+    ]
 
-    if not ok:
+    entries = []
+    used_attrs: list[str] = []
+    for search_filter, attrs in search_attempts:
+        try:
+            ok = conn.search(
+                base_dn,
+                search_filter,
+                search_scope=SUBTREE,
+                attributes=attrs,
+                time_limit=30,
+                size_limit=500,
+            )
+        except LDAPException as exc:
+            _log(f"  LDAP search error ({search_filter}): {exc}")
+            continue
+        if ok and conn.entries:
+            entries = conn.entries
+            used_attrs = attrs
+            _log(f"  LDAP search matched using filter {search_filter}")
+            break
+
+    if not entries:
         result["error"] = "LDAP search returned no results (anonymous bind may be restricted)"
         _log("  LDAP search returned no results")
         conn.unbind()
         return result
 
     users = []
-    for entry in conn.entries:
-        sam = None
+    for entry in entries:
+        username = None
+        # AD path
         try:
-            sam = str(entry.sAMAccountName.value) if entry.sAMAccountName else None
+            username = str(entry.sAMAccountName.value) if entry.sAMAccountName else None
         except Exception:
             pass
-        if sam and sam.strip() and sam.strip().lower() not in ("", "$"):
-            users.append(sam.strip())
+        # OpenLDAP path
+        if not username:
+            try:
+                username = str(entry.uid.value) if entry.uid else None
+            except Exception:
+                pass
+        if username and username.strip() and username.strip().lower() not in ("", "$"):
+            users.append(username.strip())
 
     conn.unbind()
 
