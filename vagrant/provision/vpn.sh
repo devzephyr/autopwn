@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# vpn.sh — Provision script for vpn.neutron.local (172.16.30.10)
+# vpn.sh — Provision script for vpn.neutron.local (172.16.30.30)
 # Ubuntu 22.04, runs as root, fully unattended, idempotent
 # Services: OpenVPN with PKI certificate authentication (no password logins)
 # Intentional finding: client cert + key left readable at /home/vagrant/vpn-client/

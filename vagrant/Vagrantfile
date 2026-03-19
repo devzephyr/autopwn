@@ -417,7 +417,7 @@ Vagrant.configure("2") do |config|
         "HOST_IP"    => JUMPBOX_IP,
         "VLAN30_GW"  => PFSENSE_VLAN30,
         "DC_IP"      => DC01_IP,
-        "PRIVDNS_IP" => PRIVDNS_IP,
+        "PUBDNS_IP"  => PUBDNS_IP,
       }
   end
 

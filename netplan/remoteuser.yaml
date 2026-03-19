@@ -1,0 +1,22 @@
+# netplan config for VPN User (External) — 172.16.21.20 (External)
+# Role: simulates external remote user; connects to VPN to get internal access
+# Apply: sudo cp remoteuser.yaml /etc/netplan/99-neutron.yaml && sudo netplan apply
+#
+# DNS: pubdns (172.16.10.35) — returns NXDOMAIN for neutron.local before VPN.
+# After VPN connects, OpenVPN pushes privdns (172.16.12.11) as DNS.
+#
+# Adjust 'enp0s3' to match your actual interface: ip link show
+network:
+  version: 2
+  ethernets:
+    enp0s3:
+      addresses:
+        - 172.16.21.20/26
+      routes:
+        - to: 0.0.0.0/0
+          via: 172.16.21.1
+      nameservers:
+        addresses:
+          - 172.16.10.35
+          - 8.8.8.8
+      dhcp4: false

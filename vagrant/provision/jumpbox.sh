@@ -25,7 +25,10 @@ log() { echo "[jumpbox] $(date +%H:%M:%S) $*"; }
 HOST_IP="${HOST_IP:-172.16.30.20}"
 VLAN30_GW="${VLAN30_GW:-172.16.30.1}"
 DC_IP="${DC_IP:-172.16.10.10}"
-PRIVDNS_IP="${PRIVDNS_IP:-172.16.10.53}"
+# DNS: use pubdns (VLAN30 local), NOT privdns (VLAN10).
+# pfSense blocks VLAN30→VLAN10 for all DMZ hosts except the VPN server,
+# so privdns is unreachable from jumpbox. pubdns is on the same VLAN.
+PUBDNS_IP="${PUBDNS_IP:-172.16.30.10}"
 
 log "Starting provisioner | HOST_IP=${HOST_IP} VLAN30_GW=${VLAN30_GW}"
 
@@ -57,7 +60,7 @@ network:
           via: ${VLAN30_GW}
       nameservers:
         addresses:
-          - ${PRIVDNS_IP}
+          - ${PUBDNS_IP}
           - 8.8.8.8
       dhcp4: false
 EOF

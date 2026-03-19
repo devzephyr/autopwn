@@ -1,0 +1,22 @@
+# netplan config for Kali (External Attacker) — 172.16.21.11 (External)
+# Role: attacker machine — autopwn.py runs from here
+# Apply: sudo cp kali.yaml /etc/netplan/99-neutron.yaml && sudo netplan apply
+#
+# DNS: pubdns (172.16.10.35) before VPN — neutron.local returns NXDOMAIN.
+# After VPN pivot, OpenVPN pushes privdns (172.16.12.11) so internal names resolve.
+#
+# Adjust 'eth0' to match your actual interface: ip link show
+network:
+  version: 2
+  ethernets:
+    eth0:
+      addresses:
+        - 172.16.21.11/26
+      routes:
+        - to: 0.0.0.0/0
+          via: 172.16.21.1
+      nameservers:
+        addresses:
+          - 172.16.10.35
+          - 8.8.8.8
+      dhcp4: false
