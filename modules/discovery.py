@@ -147,29 +147,101 @@ def _layer_reverse_dns(hosts: dict[str, dict]) -> None:
 # Layer 4: Forward DNS brute-force
 # ---------------------------------------------------------------------------
 
+def _is_private_ip(ip: str) -> bool:
+    """Return True for RFC-1918 and loopback addresses."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+        return addr.is_private or addr.is_loopback
+    except ValueError:
+        return False
+
+
+def _resolv_conf_nameservers() -> list[str]:
+    """Read private nameservers from /etc/resolv.conf.
+
+    Public resolvers (8.8.8.8, 1.1.1.1, etc.) are excluded — they will
+    never serve an internal zone and would just waste time.
+    """
+    servers: list[str] = []
+    try:
+        for line in pathlib.Path("/etc/resolv.conf").read_text().splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == "nameserver":
+                ip = parts[1]
+                if _is_private_ip(ip):
+                    servers.append(ip)
+    except OSError:
+        pass
+    return servers
+
+
 def _find_dns_servers(hosts: dict[str, dict]) -> list[str]:
     """
-    Identify likely DNS servers: check port 53 with a quick nmap probe
-    on the already-discovered hosts.
+    Identify likely DNS servers from two sources:
+      1. /etc/resolv.conf — catches servers outside the scanned CIDR
+      2. Port 53 probe on all discovered hosts
     """
-    if not hosts:
-        return []
-    nm = nmap.PortScanner()
+    seen: set[str] = set()
     dns_servers: list[str] = []
-    ip_list = " ".join(hosts.keys())
-    print(f"  [Layer 4] Probing {len(hosts)} host(s) for port 53 (DNS).")
-    try:
-        nm.scan(hosts=ip_list, arguments="-p 53 --open -T4")
-        for host in nm.all_hosts():
-            try:
-                if nm[host]["tcp"][53]["state"] == "open":
-                    dns_servers.append(host)
-                    print(f"    [+] DNS server found: {host}")
-            except KeyError:
-                pass
-    except nmap.PortScannerError as exc:
-        print(f"  [!] DNS server probe error: {exc}")
+
+    # Source 1: system resolver config
+    for ip in _resolv_conf_nameservers():
+        if ip not in seen:
+            seen.add(ip)
+            dns_servers.append(ip)
+            print(f"    [+] DNS server (resolv.conf): {ip}")
+
+    # Source 2: port 53 probe on discovered hosts
+    if hosts:
+        nm = nmap.PortScanner()
+        ip_list = " ".join(hosts.keys())
+        print(f"  [Layer 4] Probing {len(hosts)} host(s) for port 53 (DNS).")
+        try:
+            nm.scan(hosts=ip_list, arguments="-p 53 --open -T4")
+            for host in nm.all_hosts():
+                try:
+                    if nm[host]["tcp"][53]["state"] == "open" and host not in seen:
+                        seen.add(host)
+                        dns_servers.append(host)
+                        print(f"    [+] DNS server (port scan): {host}")
+                except KeyError:
+                    pass
+        except nmap.PortScannerError as exc:
+            print(f"  [!] DNS server probe error: {exc}")
+
     return dns_servers
+
+
+# Generic internal suffixes — tried in order when no hostname has been resolved yet.
+# These are standard RFC-1918 / enterprise conventions, not topology-specific.
+_CANDIDATE_SUFFIXES = ["local", "internal", "corp", "lan", "ad", "home", "intranet"]
+
+
+def _discover_zone(dns_ip: str) -> list[str]:
+    """
+    Ask a DNS server which zone(s) it is authoritative for by sending SOA
+    queries for each candidate suffix.  Returns confirmed suffixes in order.
+    """
+    confirmed: list[str] = []
+    try:
+        import dns.resolver   # type: ignore
+        import dns.rdatatype  # type: ignore
+
+        resolver = dns.resolver.Resolver(configure=False)
+        resolver.nameservers = [dns_ip]
+        resolver.lifetime = 3
+
+        for suffix in _CANDIDATE_SUFFIXES:
+            try:
+                resolver.resolve(suffix, "SOA", raise_on_no_answer=False)
+                confirmed.append(suffix)
+                print(f"    [+] Zone confirmed on {dns_ip}: {suffix}")
+            except Exception:
+                pass
+    except ImportError:
+        pass
+    return confirmed
 
 
 def _layer_forward_dns(
@@ -191,61 +263,75 @@ def _layer_forward_dns(
         print("  [Layer 4] No DNS servers discovered; skipping forward brute-force.")
         return new_hosts
 
-    # Derive a candidate domain suffix from existing hostnames or CIDR
-    domain_suffix = ""
+    # Build the list of suffixes to try for each DNS server.
+    # Priority:
+    #   1. Suffixes already seen in resolved hostnames (most reliable)
+    #   2. Zones confirmed via SOA query against each server
+    #   3. Bare name (no suffix) as a last resort
+    seen_suffixes: list[str] = []
     for record in hosts.values():
         hn = record.get("hostname", "")
         if hn and "." in hn:
-            parts = hn.split(".", 1)
-            if len(parts) == 2:
-                domain_suffix = parts[1]
-                break
+            suffix = hn.split(".", 1)[1]
+            if suffix not in seen_suffixes:
+                seen_suffixes.append(suffix)
 
     print(
         f"  [Layer 4] Forward DNS brute-force: {len(names)} names, "
-        f"suffix='{domain_suffix}', servers={dns_servers}."
+        f"servers={dns_servers}, known_suffixes={seen_suffixes}."
     )
 
-    # Point resolver at the first discovered DNS server
-    primary_dns = dns_servers[0]
-    original_dns = None
     try:
         import dns.resolver  # type: ignore  # dnspython is optional
-        resolver = dns.resolver.Resolver(configure=False)
-        resolver.nameservers = [primary_dns]
 
-        for name in names:
-            fqdn = f"{name}.{domain_suffix}" if domain_suffix else name
-            try:
-                answers = resolver.resolve(fqdn, "A", lifetime=3)
-                for rdata in answers:
-                    ip = str(rdata)
-                    if ip not in hosts and ip not in new_hosts:
+        for primary_dns in dns_servers:
+            resolver = dns.resolver.Resolver(configure=False)
+            resolver.nameservers = [primary_dns]
+            resolver.lifetime = 3
+
+            # Determine suffixes to query against this specific server
+            suffixes = list(seen_suffixes)
+            if not suffixes:
+                # No hostname resolved yet — interrogate the server for its zones
+                suffixes = _discover_zone(primary_dns)
+            if not suffixes:
+                suffixes = [""]   # bare names only
+
+            for suffix in suffixes:
+                for name in names:
+                    fqdn = f"{name}.{suffix}" if suffix else name
+                    try:
+                        answers = resolver.resolve(fqdn, "A", lifetime=3)
+                        for rdata in answers:
+                            ip = str(rdata)
+                            if ip not in hosts and ip not in new_hosts:
+                                new_hosts[ip] = {
+                                    "ip": ip,
+                                    "hostname": fqdn,
+                                    "discovery_method": "dns_brute",
+                                }
+                                print(f"    [+] DNS brute [{primary_dns}]: {fqdn} -> {ip}")
+                    except Exception:
+                        pass
+
+    except ImportError:
+        # dnspython not available — fall back to socket (uses system resolver only)
+        print("  [Layer 4] dnspython not available; using socket fallback.")
+        suffixes = seen_suffixes if seen_suffixes else [""]
+        for suffix in suffixes:
+            for name in names:
+                fqdn = f"{name}.{suffix}" if suffix else name
+                try:
+                    ip = socket.gethostbyname(fqdn)
+                    if ip and ip not in hosts and ip not in new_hosts:
                         new_hosts[ip] = {
                             "ip": ip,
                             "hostname": fqdn,
                             "discovery_method": "dns_brute",
                         }
-                        print(f"    [+] DNS brute: {fqdn} -> {ip}")
-            except Exception:
-                pass
-
-    except ImportError:
-        # dnspython not available — fall back to socket (uses system resolver)
-        print("  [Layer 4] dnspython not available; using socket fallback.")
-        for name in names:
-            fqdn = f"{name}.{domain_suffix}" if domain_suffix else name
-            try:
-                ip = socket.gethostbyname(fqdn)
-                if ip and ip not in hosts and ip not in new_hosts:
-                    new_hosts[ip] = {
-                        "ip": ip,
-                        "hostname": fqdn,
-                        "discovery_method": "dns_brute",
-                    }
-                    print(f"    [+] DNS brute (socket): {fqdn} -> {ip}")
-            except (socket.gaierror, OSError):
-                pass
+                        print(f"    [+] DNS brute (socket): {fqdn} -> {ip}")
+                except (socket.gaierror, OSError):
+                    pass
 
     print(f"  [Layer 4] Forward DNS brute-force added {len(new_hosts)} new host(s).")
     return new_hosts

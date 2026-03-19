@@ -235,8 +235,12 @@ def _set_flags(
 
 def _enrich_host(host_record: dict) -> dict:
     """
-    Run a two-phase nmap scan against a single host and return the enriched
+    Run a three-phase nmap scan against a single host and return the enriched
     host dict in the services.json schema.
+
+    Phase 1: SYN pre-scan to find which interesting ports are open.
+    Phase 2: Version + OS detection on all interesting ports (always runs).
+    Phase 3: NSE scripts on ports found open in Phase 1 or Phase 2.
     """
     ip = host_record["ip"]
     hostname = host_record.get("hostname", "")
@@ -244,47 +248,41 @@ def _enrich_host(host_record: dict) -> dict:
 
     print(f"\n  [Enrichment] Scanning {ip} ({hostname or 'no hostname'})")
 
-    # ------------------------------------------------------------------
-    # Phase 1: Fast pre-scan to discover which interesting ports are open
-    # ------------------------------------------------------------------
     port_str = ",".join(str(p) for p in INTERESTING_PORTS)
+
+    # ------------------------------------------------------------------
+    # Phase 1: SYN pre-scan to discover which interesting ports are open
+    # ------------------------------------------------------------------
     open_ports: set[int] = set()
 
-    print(f"    [Phase 1] Fast pre-scan (ports {port_str})")
+    print(f"    [Phase 1] SYN pre-scan (ports {port_str})")
     try:
-        nm.scan(hosts=ip, arguments=f"-F -T4 --open -p {port_str}")
+        nm.scan(hosts=ip, arguments=f"-sS -T4 --open -p {port_str}")
         if ip in nm.all_hosts():
             for proto in nm[ip].all_protocols():
                 for port, pdata in nm[ip][proto].items():
                     if pdata.get("state") == "open":
                         open_ports.add(int(port))
     except nmap.PortScannerError as exc:
-        print(f"    [!] Fast pre-scan error: {exc}")
+        print(f"    [!] Pre-scan error: {exc}")
 
     print(f"    [Phase 1] Open interesting ports: {sorted(open_ports) or 'none'}")
 
     # ------------------------------------------------------------------
-    # Phase 2: Full scan with version detection, OS, and NSE scripts
+    # Phase 2: Version + OS detection on ALL interesting ports
+    # Always scans the full port list so Phase 1 misses don't blind Phase 3.
     # ------------------------------------------------------------------
-    scripts = _select_scripts(open_ports)
-    full_args = "-sS -sV -O --version-intensity 7"
-    if scripts:
-        full_args += f" --script {scripts}"
-
-    # Restrict full scan to the ports we found open plus their protocol peers
-    # to avoid unnecessary noise; fall back to all interesting ports
-    scan_ports = ",".join(str(p) for p in sorted(open_ports)) if open_ports else port_str
-
-    print(f"    [Phase 2] Full scan (ports {scan_ports or 'default'}, scripts: {bool(scripts)})")
+    print(f"    [Phase 2] Version + OS scan (ports {port_str})")
 
     enriched_ports: list[dict] = []
     nse_by_port: dict[int, dict[str, str]] = {}
     os_guess = ""
+    open_ports_p2: set[int] = set()
 
     try:
-        nm.scan(hosts=ip, arguments=f"{full_args} -p {scan_ports}" if scan_ports else full_args)
+        nm.scan(hosts=ip, arguments=f"-sS -sV -O --version-intensity 7 -p {port_str}")
         if ip not in nm.all_hosts():
-            print(f"    [!] Host {ip} not in full-scan results (may be down).")
+            print(f"    [!] Host {ip} not in Phase 2 results (may be down).")
         else:
             os_guess = _extract_os_guess(nm, ip)
             if os_guess:
@@ -293,9 +291,6 @@ def _enrich_host(host_record: dict) -> dict:
             for proto in nm[ip].all_protocols():
                 for port_num, pdata in nm[ip][proto].items():
                     state = pdata.get("state", "")
-                    nse_results = _parse_nse_results(pdata)
-                    nse_by_port[int(port_num)] = nse_results
-
                     port_entry = {
                         "port": int(port_num),
                         "protocol": proto,
@@ -304,23 +299,51 @@ def _enrich_host(host_record: dict) -> dict:
                         "version": " ".join(
                             filter(None, [pdata.get("product", ""), pdata.get("version", "")])
                         ),
-                        "nse_results": nse_results,
+                        "nse_results": {},
                     }
                     enriched_ports.append(port_entry)
                     if state == "open":
-                        nse_summary = ", ".join(
-                            f"{k}: {v[:60]}" for k, v in nse_results.items()
-                        )
+                        open_ports_p2.add(int(port_num))
                         print(
                             f"    [Port] {port_num}/{proto} open  "
                             f"{pdata.get('name','')}  {pdata.get('product','')}  "
                             f"{pdata.get('version','')}"
                         )
-                        if nse_summary:
-                            print(f"           NSE: {nse_summary}")
 
     except nmap.PortScannerError as exc:
-        print(f"    [!] Full scan error: {exc}")
+        print(f"    [!] Phase 2 error: {exc}")
+
+    # ------------------------------------------------------------------
+    # Phase 3: NSE scripts based on ports found open in Phase 1 OR Phase 2
+    # ------------------------------------------------------------------
+    all_open = open_ports | open_ports_p2
+    scripts = _select_scripts(all_open)
+
+    if scripts and all_open:
+        nse_ports = ",".join(str(p) for p in sorted(all_open))
+        print(f"    [Phase 3] NSE scripts on open ports {nse_ports}")
+        try:
+            nm.scan(hosts=ip, arguments=f"-sS --script {scripts} -p {nse_ports}")
+            if ip in nm.all_hosts():
+                for proto in nm[ip].all_protocols():
+                    for port_num, pdata in nm[ip][proto].items():
+                        nse_results = _parse_nse_results(pdata)
+                        if nse_results:
+                            nse_by_port[int(port_num)] = nse_results
+                            nse_summary = ", ".join(
+                                f"{k}: {v[:60]}" for k, v in nse_results.items()
+                            )
+                            print(f"           NSE [{port_num}]: {nse_summary}")
+        except nmap.PortScannerError as exc:
+            print(f"    [!] Phase 3 NSE error: {exc}")
+    else:
+        print(f"    [Phase 3] No open ports with NSE scripts — skipping.")
+
+    # Merge Phase 3 NSE results into the port entries built in Phase 2
+    for port_entry in enriched_ports:
+        port_num = port_entry["port"]
+        if port_num in nse_by_port:
+            port_entry["nse_results"] = nse_by_port[port_num]
 
     # Sort ports for deterministic output
     enriched_ports.sort(key=lambda p: p["port"])
