@@ -5,6 +5,7 @@ RIS602 Final Project: Topology-Agnostic Automated Penetration Testing Pipeline
 
 Usage:
     python3 autopwn.py --target 172.16.10.0/24
+    python3 autopwn.py --target 172.16.21.0/26 172.16.10.32/28 172.16.12.0/27
     python3 autopwn.py --auto
     python3 autopwn.py --target 172.16.10.0/24 --dry-run
     python3 autopwn.py --target 172.16.10.0/24 --resume
@@ -404,7 +405,7 @@ def _collect_credentials() -> list[dict]:
 # ---------------------------------------------------------------------------
 # Print banner
 # ---------------------------------------------------------------------------
-def print_banner(target: str) -> None:
+def print_banner(targets: list[str]) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "╔══════════════════════════════════════════════════════════════╗",
@@ -414,7 +415,12 @@ def print_banner(target: str) -> None:
     ]
     for line in lines:
         print(_c(CYAN, line))
-    print(f"  {BOLD}Target :{RESET} {WHITE}{target}{RESET}")
+    if len(targets) == 1:
+        print(f"  {BOLD}Target :{RESET} {WHITE}{targets[0]}{RESET}")
+    else:
+        print(f"  {BOLD}Targets:{RESET} {WHITE}{targets[0]}{RESET}")
+        for t in targets[1:]:
+            print(f"           {WHITE}{t}{RESET}")
     print(f"  {BOLD}Started:{RESET} {WHITE}{ts}{RESET}")
     print(f"  {BOLD}Mode   :{RESET} {YELLOW}{'DRY-RUN' if DRY_RUN else 'LIVE'}{RESET}\n")
 
@@ -428,8 +434,9 @@ def parse_args() -> argparse.Namespace:
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
-        "--target", metavar="CIDR",
-        help="Target subnet in CIDR notation (e.g. 192.168.1.0/24)",
+        "--target", metavar="CIDR", nargs="+",
+        help="One or more target subnets in CIDR notation "
+             "(e.g. 172.16.21.0/26 172.16.10.32/28)",
     )
     group.add_argument(
         "--auto", action="store_true",
@@ -641,11 +648,16 @@ def main() -> None:
     args = parse_args()
     DRY_RUN = args.dry_run
 
-    # Resolve target CIDR
+    # Resolve initial target CIDRs
     if args.auto:
-        cidr = detect_local_cidr()
+        initial_cidrs = [detect_local_cidr()]
     else:
-        cidr = args.target
+        initial_cidrs = args.target
+        for c in initial_cidrs:
+            try:
+                ipaddress.IPv4Network(c, strict=False)
+            except ValueError as exc:
+                sys.exit(f"Invalid CIDR '{c}': {exc}")
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -653,10 +665,10 @@ def main() -> None:
     if str(BASE_DIR) not in sys.path:
         sys.path.insert(0, str(BASE_DIR))
 
-    print_banner(cidr)
-    tlog("orchestrator", f"Pipeline started — target: {cidr}", "start")
+    print_banner(initial_cidrs)
+    tlog("orchestrator", f"Pipeline started — targets: {', '.join(initial_cidrs)}", "start")
 
-    lhost = detect_lhost(cidr)
+    lhost = detect_lhost(initial_cidrs[0])
     info(f"LHOST (outbound interface): {lhost}")
 
     # ── Iterative loop ────────────────────────────────────────────────────────
@@ -668,8 +680,12 @@ def main() -> None:
     #   4. Stop when: no new hosts found, no new subnets, no new creds,
     #                 or max_iterations reached
     #
-    known_cidrs:  set[str]   = {cidr}
-    pending_cidrs: list[str] = [cidr]
+    # User-supplied CIDRs are scanned in the first N iterations without being
+    # treated as pivots.  Only auto-discovered subnets are marked pivot=True.
+    #
+    user_cidrs:    set[str]   = set(initial_cidrs)
+    known_cidrs:   set[str]   = set(initial_cidrs)
+    pending_cidrs: list[str]  = list(initial_cidrs)
     cred_snapshot = frozenset()
     host_snapshot = frozenset()
     iteration = 0
@@ -677,7 +693,7 @@ def main() -> None:
     while pending_cidrs and iteration < args.max_iterations:
         iteration += 1
         current_cidr = pending_cidrs.pop(0)
-        pivot = (iteration > 1)
+        pivot = current_cidr not in user_cidrs   # only auto-discovered subnets are pivots
 
         bar = "═" * 62
         print(f"\n{CYAN}{bar}{RESET}")
@@ -736,7 +752,8 @@ def main() -> None:
     bar = "═" * 62
     print(f"\n{GREEN}{bar}{RESET}")
     print(f"{BOLD}{GREEN}  Pipeline complete — {iteration} iteration(s).{RESET}")
-    print(f"  Subnets scanned : {_c(WHITE, ', '.join(sorted(known_cidrs)))}")
+    user_label = f" ({len(user_cidrs)} user-specified)" if len(user_cidrs) > 1 else ""
+    print(f"  Subnets scanned : {_c(WHITE, ', '.join(sorted(known_cidrs)))}{user_label}")
     final_creds = _snapshot_credentials()
     print(f"  Credentials held: {_c(WHITE, str(len(final_creds)))}")
     final_hosts = _snapshot_hosts()
