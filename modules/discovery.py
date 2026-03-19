@@ -147,14 +147,30 @@ def _layer_reverse_dns(hosts: dict[str, dict]) -> None:
 # Layer 4: Forward DNS brute-force
 # ---------------------------------------------------------------------------
 
+def _is_private_ip(ip: str) -> bool:
+    """Return True for RFC-1918 and loopback addresses."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+        return addr.is_private or addr.is_loopback
+    except ValueError:
+        return False
+
+
 def _resolv_conf_nameservers() -> list[str]:
-    """Read nameservers from /etc/resolv.conf."""
+    """Read private nameservers from /etc/resolv.conf.
+
+    Public resolvers (8.8.8.8, 1.1.1.1, etc.) are excluded — they will
+    never serve an internal zone and would just waste time.
+    """
     servers: list[str] = []
     try:
         for line in pathlib.Path("/etc/resolv.conf").read_text().splitlines():
             parts = line.split()
             if len(parts) >= 2 and parts[0] == "nameserver":
-                servers.append(parts[1])
+                ip = parts[1]
+                if _is_private_ip(ip):
+                    servers.append(ip)
     except OSError:
         pass
     return servers
