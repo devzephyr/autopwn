@@ -263,7 +263,7 @@ import subprocess
 ```json
 {
   "domain": "neutron.local",
-  "dc_ip": "172.16.10.10",
+  "dc_ip": "172.16.12.10",
   "users": ["administrator", "jsmith", "svc_backup"],
   "asrep_hashes": ["$krb5asrep$23$jsmith@NEUTRON.LOCAL:..."],
   "kerberoast_hashes": [],
@@ -684,8 +684,8 @@ are complete:
 {
   "hosts": [
     {
-      "ip": "172.16.10.10",
-      "hostname": "dc01.neutron.local",
+      "ip": "172.16.12.10",
+      "hostname": "dc.neutron.local",
       "os_guess": "Windows Server 2019",
       "ports": [
         {"port": 88, "protocol": "tcp", "state": "open", "service": "kerberos-sec", "version": "", "nse_results": {}},
@@ -695,24 +695,36 @@ are complete:
       "flags": {"is_domain_controller": true, "has_wordpress": false, "has_dvwa": false, "ms17_010_vulnerable": false}
     },
     {
-      "ip": "172.16.10.20",
-      "hostname": "corpweb.neutron.local",
+      "ip": "172.16.12.12",
+      "hostname": "files.neutron.local",
       "os_guess": "Linux 4.x",
       "ports": [
-        {"port": 80, "protocol": "tcp", "state": "open", "service": "http", "version": "Apache 2.4.41", "nse_results": {"http-title": "DVWA", "http-enum": "/dvwa/login.php"}},
-        {"port": 3306, "protocol": "tcp", "state": "open", "service": "mysql", "version": "MySQL 8.0", "nse_results": {"mysql-empty-password": "root account has empty password"}}
+        {"port": 80, "protocol": "tcp", "state": "open", "service": "http", "version": "Apache 2.4.41", "nse_results": {"http-title": "Neutron Files", "http-enum": "/"}},
+        {"port": 3306, "protocol": "tcp", "state": "open", "service": "mysql", "version": "MySQL 8.0", "nse_results": {"mysql-empty-password": "root account has empty password"}},
+        {"port": 6379, "protocol": "tcp", "state": "open", "service": "redis", "version": "Redis 7.0", "nse_results": {"redis-info": "redis_version:7.0.0"}},
+        {"port": 2049, "protocol": "tcp", "state": "open", "service": "nfs", "version": "", "nse_results": {}}
       ],
-      "flags": {"is_domain_controller": false, "has_wordpress": false, "has_dvwa": true, "ms17_010_vulnerable": false}
+      "flags": {"is_domain_controller": false, "has_wordpress": false, "has_dvwa": false, "ms17_010_vulnerable": false}
     },
     {
-      "ip": "172.16.10.30",
-      "hostname": "files.neutron.local",
-      "os_guess": "Windows 10",
+      "ip": "172.16.10.36",
+      "hostname": "shop.neutron.local",
+      "os_guess": "Linux 4.x",
       "ports": [
-        {"port": 445, "protocol": "tcp", "state": "open", "service": "microsoft-ds", "version": "Windows 10", "nse_results": {"smb-vuln-ms17-010": "VULNERABLE", "smb-security-mode": "account_used: guest"}},
-        {"port": 5985, "protocol": "tcp", "state": "open", "service": "http", "version": "Microsoft HTTPAPI 2.0", "nse_results": {}}
+        {"port": 80, "protocol": "tcp", "state": "open", "service": "http", "version": "nginx 1.18", "nse_results": {"http-title": "Neutron Shop", "http-enum": "/wp-login.php"}},
+        {"port": 443, "protocol": "tcp", "state": "open", "service": "https", "version": "nginx 1.18", "nse_results": {"http-title": "Neutron Shop"}}
       ],
-      "flags": {"is_domain_controller": false, "has_wordpress": false, "has_dvwa": false, "ms17_010_vulnerable": true}
+      "flags": {"is_domain_controller": false, "has_wordpress": true, "has_dvwa": false, "ms17_010_vulnerable": false}
+    },
+    {
+      "ip": "172.16.10.41",
+      "hostname": "jumpbox",
+      "os_guess": "Linux 5.x",
+      "ports": [
+        {"port": 22, "protocol": "tcp", "state": "open", "service": "ssh", "version": "OpenSSH 8.9", "nse_results": {"ssh-auth-methods": "publickey,password"}},
+        {"port": 3389, "protocol": "tcp", "state": "open", "service": "ms-wbt-server", "version": "", "nse_results": {}}
+      ],
+      "flags": {"is_domain_controller": false, "has_wordpress": false, "has_dvwa": false, "ms17_010_vulnerable": false}
     }
   ]
 }
@@ -722,33 +734,49 @@ are complete:
 
 ## Lab Environment — Actual Machines
 
-Testing runs directly against the Neutron Enterprise Lab machines.
+Testing runs directly against the Neutron Enterprise Lab machines (real SPR500 topology).
+One pfSense VM replaces the old introuter, borderrouter, and simulated-internet Pi.
 Apply netplan configs in `netplan/` to each Linux host before running autopwn.
 See `netplan/apply.sh` for per-host instructions.
 
+### pfSense interface map
+
+| pfSense adapter | VirtualBox type     | Interface IP      | Segment  | Hosts served                            |
+|-----------------|---------------------|-------------------|----------|-----------------------------------------|
+| vtnet0          | NAT                 | DHCP              | WAN      | Internet (replaces Pi)                  |
+| vtnet1 (LAN)    | Internal neutron-ext  | 172.16.21.1/26  | External | Kali (.11), VPN User (.20)              |
+| vtnet2 (OPT1)   | Internal neutron-dmz  | 172.16.10.33/28 | DMZ      | pubdns (.35), pubdocker (.36), vpn (.40), jumpbox (.41) |
+| vtnet3 (OPT2)   | Internal neutron-vlan10 | 172.16.10.1/28  | VLAN10   | Internal Admin/Ansible (DHCP .4–14)     |
+| vtnet4 (OPT3)   | Internal neutron-vlan20 | 172.16.10.17/28 | VLAN20   | RootCA (.18), IntCA (.19), Users (DHCP .20–30) |
+| vtnet5 (OPT4)   | Internal neutron-vlan30 | 172.16.12.1/27  | VLAN30   | DC (.10), privdns (.11), privdocker (.12) |
+| vtnet6 (OPT5)   | Internal neutron-vlan40 | 172.16.12.33/27 | VLAN40   |                                         |
+
 ### Host IP reference
 
-| Hostname                    | IP             | VLAN | Role                          |
-|-----------------------------|----------------|------|-------------------------------|
-| dc01.neutron.local          | 172.16.10.10   | 10   | Windows Server — AD DS, DNS   |
-| adminws.neutron.local       | 172.16.10.20   | 10   | Windows 10 — hradmin          |
-| userws.neutron.local        | 172.16.10.21   | 10   | Windows 10 — jsmith           |
-| privdns.neutron.local       | 172.16.10.53   | 10   | Ubuntu — internal DNS (Bind9) |
-| containers.neutron.local    | 172.16.20.10   | 20   | Ubuntu — Docker services      |
-| pubdns.neutron.local        | 172.16.30.10   | 30   | Ubuntu — public DNS           |
-| jumpbox.neutron.local       | 172.16.30.20   | 30   | Ubuntu — SSH/RDP jump host    |
-| vpn.neutron.local           | 172.16.30.30   | 30   | Ubuntu — OpenVPN              |
-| remoteuser.neutron.local    | 172.16.40.10   | 40   | Ubuntu — external client      |
-| kali.neutron.local          | 172.16.40.50   | 40   | Kali — autopwn attacker       |
+| Hostname                        | IP              | Segment  | Role                                    |
+|---------------------------------|-----------------|----------|-----------------------------------------|
+| dc.neutron.local                | 172.16.12.10    | VLAN30   | Windows Server — AD DS, DHCP            |
+| privdns.neutron.local           | 172.16.12.11    | VLAN30   | Ubuntu — internal DNS (Bind9)           |
+| files.neutron.local / erp.neutron.local | 172.16.12.12 | VLAN30 | Ubuntu — private Docker (NFS, Odoo)  |
+| (Internal Admin / Ansible)      | DHCP .4–.14     | VLAN10   | 172.16.10.0/28                          |
+| (RootCA)                        | 172.16.10.18    | VLAN20   | Root Certificate Authority              |
+| (IntermediateCA)                | 172.16.10.19    | VLAN20   | Intermediate Certificate Authority      |
+| (Internal Users)                | DHCP .20–.30    | VLAN20   | 172.16.10.16/28                         |
+| pubdns.neutron.local            | 172.16.10.35    | DMZ      | Ubuntu — public DNS (NXDOMAIN internal) |
+| shop.neutron.local / corp.neutron.local | 172.16.10.36 | DMZ  | Ubuntu — public Docker (web)            |
+| vpn.neutron.local               | 172.16.10.40    | DMZ      | Ubuntu — OpenVPN server                 |
+| (Jumpbox)                       | 172.16.10.41    | DMZ      | Ubuntu — SSH/RDP jump host              |
+| (VPN User / external client)    | 172.16.21.20    | External | Ubuntu — OpenVPN client                 |
+| (Kali / External Attacker)      | 172.16.21.11    | External | Kali — autopwn.py runs here             |
 
 ### Testing individual modules against the lab
 
 ```bash
-# Test ad_enum.py — point at the live DC
+# Test ad_enum.py — point at the live DC (172.16.12.10, reachable after VPN pivot)
 python3 -c "
 import json, pathlib
-data = {'hosts': [{'ip': '172.16.10.10', 'hostname': 'dc01.neutron.local',
-    'os_guess': 'Windows Server 2019', 'ports': [
+data = {'hosts': [{'ip': '172.16.12.10', 'hostname': 'dc.neutron.local',
+    'os_guess': 'Windows Server', 'ports': [
         {'port': 88,  'protocol': 'tcp', 'state': 'open', 'service': 'kerberos-sec', 'version': '', 'nse_results': {}},
         {'port': 389, 'protocol': 'tcp', 'state': 'open', 'service': 'ldap', 'version': '', 'nse_results': {}}],
     'flags': {'is_domain_controller': True, 'has_wordpress': False,
@@ -758,38 +786,52 @@ pathlib.Path('state/services.json').write_text(json.dumps(data, indent=2))
 "
 python3 modules/ad_enum.py
 
-# Test SSH exploit against jumpbox
+# Test SSH exploit against jumpbox (reachable from external/Kali)
 python3 -c "
 from modules.exploits.ssh import exploit_ssh
-print(exploit_ssh('172.16.30.20'))
+print(exploit_ssh('172.16.10.41'))
 "
 
-# Test MySQL against containers host
+# Test MySQL against private docker host (172.16.12.12, reachable after VPN)
 python3 -c "
 from modules.exploits.database import exploit_mysql
-print(exploit_mysql('172.16.20.10'))
+print(exploit_mysql('172.16.12.12'))
 "
 
-# Test Redis against containers host
+# Test Redis against private docker host (reachable after VPN)
 python3 -c "
 from modules.exploits.database import exploit_redis
-print(exploit_redis('172.16.20.10'))
+print(exploit_redis('172.16.12.12'))
 "
 
-# Test DVWA against containers host
+# Test public web against public docker host (reachable from external)
 python3 -c "
 from modules.exploits.web import exploit_dvwa
-print(exploit_dvwa('172.16.20.10'))
+print(exploit_dvwa('172.16.10.36'))
 "
 ```
 
 ### Recommended test order
 
-1. Redis (172.16.20.10:6379) — instant, stateless
-2. MySQL (172.16.20.10:3306) — instant, stateless
-3. SSH   (172.16.30.20:22)   — jumpbox brute-force
-4. DVWA  (172.16.20.10:8080) — SQLi path
-5. AD enum against dc01      — most complex, test last
+1. SSH    (172.16.10.41:22)    — jumpbox, reachable from Kali before VPN
+2. Redis  (172.16.12.12:6379)  — private docker, requires VPN pivot first
+3. MySQL  (172.16.12.12:3306)  — private docker, requires VPN pivot first
+4. Web    (172.16.10.36:80)    — public docker, reachable from Kali before VPN
+5. AD enum against dc          — 172.16.12.10, requires VPN pivot, test last
+
+### Connectivity check from Kali (run before autopwn)
+
+```bash
+# DMZ hosts — reachable directly from Kali (External)
+for ip in 172.16.10.35 172.16.10.36 172.16.10.40 172.16.10.41; do
+    ping -c1 -W1 $ip && echo "$ip UP" || echo "$ip DOWN"
+done
+
+# VLAN30 hosts — only reachable after VPN pivot to vpn.neutron.local
+for ip in 172.16.12.10 172.16.12.11 172.16.12.12; do
+    ping -c1 -W1 $ip && echo "$ip UP (VPN active)" || echo "$ip DOWN (need VPN)"
+done
+```
 
 ---
 
@@ -812,8 +854,13 @@ print(exploit_dvwa('172.16.20.10'))
 
 4. Verify connectivity from Kali to each lab host:
    ```bash
-   for ip in 172.16.10.10 172.16.10.53 172.16.20.10 172.16.30.10 172.16.30.20 172.16.30.30; do
+   # DMZ hosts (reachable directly from Kali on 172.16.21.11)
+   for ip in 172.16.10.35 172.16.10.36 172.16.10.40 172.16.10.41; do
        ping -c1 -W1 $ip && echo "$ip UP" || echo "$ip DOWN"
+   done
+   # VLAN30 hosts (reachable only after VPN pivot via vpn.neutron.local)
+   for ip in 172.16.12.10 172.16.12.11 172.16.12.12; do
+       ping -c1 -W1 $ip && echo "$ip UP (VPN active)" || echo "$ip DOWN (need VPN)"
    done
    ```
 

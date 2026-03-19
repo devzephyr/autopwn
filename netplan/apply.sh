@@ -2,8 +2,8 @@
 # =============================================================================
 # apply.sh — Apply netplan static IP configs to Neutron Lab Linux hosts
 #
-# Run this FROM Kali (172.16.40.50) via SSH on each target host, or copy
-# the relevant YAML to each machine and run netplan apply locally.
+# Real SPR500 topology — run FROM Kali (172.16.21.11) via SSH on each target,
+# or copy the relevant YAML to each machine and run netplan apply locally.
 #
 # Usage:
 #   bash apply.sh <hostname>          # apply to a specific host
@@ -11,20 +11,32 @@
 #   bash apply.sh check               # ping-check all hosts first
 #
 # Requirements: ssh key or password access to each host as root/sudo.
+#
+# Host map (real SPR500 IPs):
+#   privdns      172.16.12.11   VLAN30  — internal DNS (Bind9)
+#   privdocker   172.16.12.12   VLAN30  — private Docker (files, erp)
+#   pubdns       172.16.10.35   DMZ     — public DNS (Bind9)
+#   pubdocker    172.16.10.36   DMZ     — public Docker (shop, corp)
+#   vpn          172.16.10.40   DMZ     — OpenVPN server
+#   jumpbox      172.16.10.41   DMZ     — SSH/RDP jump host
+#   remoteuser   172.16.21.20   Ext     — VPN user / external client
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Host → config mapping  (hostname : ip : yaml-file)
+# Host → config mapping  (hostname : current-ip : yaml-file)
+# NOTE: privdns and privdocker are on VLAN30; Kali cannot reach them directly
+# before VPN. Connect via jumpbox or apply locally on each machine first.
 declare -A HOSTS=(
-    ["privdns"]="172.16.10.53:${SCRIPT_DIR}/privdns.yaml"
-    ["containers"]="172.16.20.10:${SCRIPT_DIR}/containers.yaml"
-    ["pubdns"]="172.16.30.10:${SCRIPT_DIR}/pubdns.yaml"
-    ["jumpbox"]="172.16.30.20:${SCRIPT_DIR}/jumpbox.yaml"
-    ["vpn"]="172.16.30.30:${SCRIPT_DIR}/vpn.yaml"
-    ["remoteuser"]="172.16.40.10:${SCRIPT_DIR}/remoteuser.yaml"
+    ["privdns"]="172.16.12.11:${SCRIPT_DIR}/privdns.yaml"
+    ["privdocker"]="172.16.12.12:${SCRIPT_DIR}/containers.yaml"
+    ["pubdns"]="172.16.10.35:${SCRIPT_DIR}/pubdns.yaml"
+    ["pubdocker"]="172.16.10.36:${SCRIPT_DIR}/publicdocker.yaml"
+    ["vpn"]="172.16.10.40:${SCRIPT_DIR}/vpn.yaml"
+    ["jumpbox"]="172.16.10.41:${SCRIPT_DIR}/jumpbox.yaml"
+    ["remoteuser"]="172.16.21.20:${SCRIPT_DIR}/remoteuser.yaml"
 )
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=5"
@@ -80,7 +92,7 @@ case "${1:-help}" in
         check_hosts
         ;;
     help|--help|-h)
-        echo "Usage: $0 <privdns|containers|pubdns|jumpbox|vpn|remoteuser|all|check>"
+        echo "Usage: $0 <privdns|privdocker|pubdns|pubdocker|vpn|jumpbox|remoteuser|all|check>"
         ;;
     *)
         if [[ -v "HOSTS[$1]" ]]; then

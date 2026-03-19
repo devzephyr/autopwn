@@ -1,11 +1,10 @@
-# netplan config for vpn.neutron.local — 172.16.30.30 (VLAN30/DMZ)
-# Role: OpenVPN concentrator — pushes routes to VLAN10/20/30 for VPN clients
+# netplan config for vpn.neutron.local — 172.16.10.40 (DMZ)
+# Role: OpenVPN concentrator — NATMASQs VPN clients, pushes internal routes
 # Apply: sudo cp vpn.yaml /etc/netplan/99-neutron.yaml && sudo netplan apply
 #
-# Specific routes for VLAN10 and VLAN20 ensure VPN-NATed client traffic
-# is forwarded correctly through pfSense (not leaked via eth0 NAT).
-# The VPN server (172.16.30.30) has a special pfSense rule (V30-1/V30-1b)
-# allowing it to reach VLAN10 and VLAN20 — hence privdns works as DNS here.
+# pfSense special rules DMZ-1/2/3 allow traffic sourced from 172.16.10.40
+# to reach VLAN10, VLAN20, and VLAN30 (DC segment).
+# VPN clients get privdns (172.16.12.11) pushed as DNS so neutron.local resolves.
 #
 # Adjust 'enp0s3' to match your actual interface: ip link show
 network:
@@ -13,16 +12,18 @@ network:
   ethernets:
     enp0s3:
       addresses:
-        - 172.16.30.30/24
+        - 172.16.10.40/28
       routes:
         - to: 0.0.0.0/0
-          via: 172.16.30.1
-        - to: 172.16.10.0/24
-          via: 172.16.30.1
-        - to: 172.16.20.0/24
-          via: 172.16.30.1
+          via: 172.16.10.33
+        - to: 172.16.10.0/28
+          via: 172.16.10.33
+        - to: 172.16.10.16/28
+          via: 172.16.10.33
+        - to: 172.16.12.0/27
+          via: 172.16.10.33
       nameservers:
         addresses:
-          - 172.16.10.53
+          - 172.16.12.11
           - 8.8.8.8
       dhcp4: false
