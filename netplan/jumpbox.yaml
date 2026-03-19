@@ -1,0 +1,23 @@
+# netplan config for jumpbox.neutron.local — 172.16.30.20 (VLAN30/DMZ)
+# Role: SSH + RDP jump host — intentionally bruteforceable
+# Apply: sudo cp jumpbox.yaml /etc/netplan/99-neutron.yaml && sudo netplan apply
+#
+# DNS: uses pubdns (172.16.30.10) — same VLAN, reachable without pfSense rules.
+# Do NOT use privdns (172.16.10.53) here: pfSense blocks VLAN30→VLAN10 for
+# all DMZ hosts except the VPN server (172.16.30.30).
+#
+# Adjust 'enp0s3' to match your actual interface: ip link show
+network:
+  version: 2
+  ethernets:
+    enp0s3:
+      addresses:
+        - 172.16.30.20/24
+      routes:
+        - to: 0.0.0.0/0
+          via: 172.16.30.1
+      nameservers:
+        addresses:
+          - 172.16.30.10
+          - 8.8.8.8
+      dhcp4: false

@@ -720,63 +720,37 @@ are complete:
 
 ---
 
-## Docker Test Environment
+## Lab Environment — Actual Machines
 
-Running the full Neutron Lab topology (11 VMs) on one machine is not feasible.
-Instead, use Docker containers to test each module incrementally before touching
-any VMs. Two files accompany this CLAUDE.md: docker-compose.yml and TESTING.md.
+Testing runs directly against the Neutron Enterprise Lab machines.
+Apply netplan configs in `netplan/` to each Linux host before running autopwn.
+See `netplan/apply.sh` for per-host instructions.
 
-### Container IP map
+### Host IP reference
 
-| IP           | Hostname         | Service       | Credentials          | Tests                        |
-|--------------|------------------|---------------|----------------------|------------------------------|
-| 172.28.0.10  | ssh-target       | SSH :22       | root / password123   | ssh.py, postex.py Linux      |
-| 172.28.0.11  | mysql-target     | MySQL :3306   | root / (empty)       | database.py MySQL path       |
-| 172.28.0.12  | redis-target     | Redis :6379   | no auth              | database.py Redis path       |
-| 172.28.0.13  | ftp-target       | FTP :21       | anonymous            | enrichment NSE, ftp path     |
-| 172.28.0.14  | snmp-target      | SNMP :161 UDP | community: public    | enrichment SNMP path         |
-| 172.28.0.21  | dvwa-target      | HTTP :80      | admin / password     | web.py DVWA SQLi path        |
-| 172.28.0.31  | wordpress-target | HTTP :80      | admin / password     | web.py WordPress creds path  |
-| 172.28.0.40  | ldap-target      | LDAP :389     | anonymous bind       | ad_enum.py LDAP path         |
+| Hostname                    | IP             | VLAN | Role                          |
+|-----------------------------|----------------|------|-------------------------------|
+| dc01.neutron.local          | 172.16.10.10   | 10   | Windows Server — AD DS, DNS   |
+| adminws.neutron.local       | 172.16.10.20   | 10   | Windows 10 — hradmin          |
+| userws.neutron.local        | 172.16.10.21   | 10   | Windows 10 — jsmith           |
+| privdns.neutron.local       | 172.16.10.53   | 10   | Ubuntu — internal DNS (Bind9) |
+| containers.neutron.local    | 172.16.20.10   | 20   | Ubuntu — Docker services      |
+| pubdns.neutron.local        | 172.16.30.10   | 30   | Ubuntu — public DNS           |
+| jumpbox.neutron.local       | 172.16.30.20   | 30   | Ubuntu — SSH/RDP jump host    |
+| vpn.neutron.local           | 172.16.30.30   | 30   | Ubuntu — OpenVPN              |
+| remoteuser.neutron.local    | 172.16.40.10   | 40   | Ubuntu — external client      |
+| kali.neutron.local          | 172.16.40.50   | 40   | Kali — autopwn attacker       |
 
-### Start the test environment
-
-```bash
-# Place docker-compose.yml, wp_setup.sh, and ldap_seed/users.ldif
-# in a directory called autopwn-test/, then:
-
-cd autopwn-test
-docker compose up -d
-
-# WordPress needs one-time browser setup:
-# Go to http://localhost:8080/setup.php -> click "Create / Reset Database"
-
-# Then configure weak WordPress credentials:
-./wp_setup.sh
-```
-
-### What Docker cannot test - requires VMs
-
-| Module / Path       | Why                                    | VM needed              |
-|---------------------|----------------------------------------|------------------------|
-| exploits/smb.py     | MS17-010 needs unpatched Windows       | Windows 7 or 2008 VM   |
-| exploits/winrm.py   | WinRM is Windows-only                  | Windows 10 VM          |
-| ad_enum.py Kerberos | Real Kerberos needs actual AD          | Neutron Lab AD host    |
-| postex.py Windows   | Windows commands need Windows shell    | Any Windows VM         |
-
-Strategy: finish and verify all Docker modules first. Then spin up only
-those two VMs. Do not start VMs until the Docker tests pass.
-
-### Testing individual modules against Docker containers
+### Testing individual modules against the lab
 
 ```bash
-# Test ad_enum.py against LDAP container
+# Test ad_enum.py — point at the live DC
 python3 -c "
 import json, pathlib
-data = {'hosts': [{'ip': '172.28.0.40', 'hostname': 'ldap-target',
-    'os_guess': 'Linux', 'ports': [
-        {'port': 389, 'protocol': 'tcp', 'state': 'open',
-         'service': 'ldap', 'version': '', 'nse_results': {}}],
+data = {'hosts': [{'ip': '172.16.10.10', 'hostname': 'dc01.neutron.local',
+    'os_guess': 'Windows Server 2019', 'ports': [
+        {'port': 88,  'protocol': 'tcp', 'state': 'open', 'service': 'kerberos-sec', 'version': '', 'nse_results': {}},
+        {'port': 389, 'protocol': 'tcp', 'state': 'open', 'service': 'ldap', 'version': '', 'nse_results': {}}],
     'flags': {'is_domain_controller': True, 'has_wordpress': False,
               'has_dvwa': False, 'ms17_010_vulnerable': False}}]}
 pathlib.Path('state').mkdir(exist_ok=True)
@@ -784,45 +758,38 @@ pathlib.Path('state/services.json').write_text(json.dumps(data, indent=2))
 "
 python3 modules/ad_enum.py
 
-# Test SSH exploit
+# Test SSH exploit against jumpbox
 python3 -c "
 from modules.exploits.ssh import exploit_ssh
-print(exploit_ssh('172.28.0.10'))
+print(exploit_ssh('172.16.30.20'))
 "
 
-# Test MySQL exploit
+# Test MySQL against containers host
 python3 -c "
 from modules.exploits.database import exploit_mysql
-print(exploit_mysql('172.28.0.11'))
+print(exploit_mysql('172.16.20.10'))
 "
 
-# Test Redis exploit
+# Test Redis against containers host
 python3 -c "
 from modules.exploits.database import exploit_redis
-print(exploit_redis('172.28.0.12'))
+print(exploit_redis('172.16.20.10'))
 "
 
-# Test DVWA exploit
+# Test DVWA against containers host
 python3 -c "
 from modules.exploits.web import exploit_dvwa
-print(exploit_dvwa('172.28.0.21'))
-"
-
-# Test WordPress exploit
-python3 -c "
-from modules.exploits.web import exploit_wordpress
-print(exploit_wordpress('172.28.0.31'))
+print(exploit_dvwa('172.16.20.10'))
 "
 ```
 
 ### Recommended test order
 
-1. Redis - instant, no setup, stateless
-2. MySQL - instant, no setup, stateless
-3. SSH - fast, single container
-4. DVWA - requires browser setup first
-5. WordPress - requires wp_setup.sh first
-6. LDAP / ad_enum.py - most complex, test last
+1. Redis (172.16.20.10:6379) — instant, stateless
+2. MySQL (172.16.20.10:3306) — instant, stateless
+3. SSH   (172.16.30.20:22)   — jumpbox brute-force
+4. DVWA  (172.16.20.10:8080) — SQLi path
+5. AD enum against dc01      — most complex, test last
 
 ---
 
@@ -831,7 +798,6 @@ print(exploit_wordpress('172.28.0.31'))
 1. Create the directory structure:
    ```bash
    mkdir -p autopwn/modules/exploits autopwn/wordlists autopwn/templates autopwn/state autopwn/output
-   mkdir -p autopwn-test/ldap_seed
    ```
 
 2. Install missing Python libraries:
@@ -839,23 +805,21 @@ print(exploit_wordpress('172.28.0.31'))
    pip3 install python-nmap pymysql jinja2 pywinrm --break-system-packages
    ```
 
-3. Install Docker (if not already installed):
+3. Apply netplan configs to lab machines (from Kali, adjust IPs if needed):
    ```bash
-   sudo apt update && sudo apt install -y docker.io docker-compose-plugin
-   sudo systemctl start docker
-   sudo usermod -aG docker $USER   # then log out and back in
+   bash netplan/apply.sh
    ```
 
-4. Start the Docker test environment:
+4. Verify connectivity from Kali to each lab host:
    ```bash
-   cd autopwn-test && docker compose up -d
+   for ip in 172.16.10.10 172.16.10.53 172.16.20.10 172.16.30.10 172.16.30.20 172.16.30.30; do
+       ping -c1 -W1 $ip && echo "$ip UP" || echo "$ip DOWN"
+   done
    ```
 
 5. Save the sample services.json from this file to autopwn/state/services.json
+   (or run Stage 1 discovery to generate it from the live network)
 
-6. Build and test modules one at a time against Docker containers
-   using the test commands in the Docker section above
+6. Build and test modules one at a time against the live lab machines
 
 7. Wire everything together in autopwn.py last
-
-8. Only spin up VMs after all Docker-testable modules pass

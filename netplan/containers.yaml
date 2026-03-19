@@ -1,0 +1,19 @@
+# netplan config for containers.neutron.local — 172.16.20.10 (VLAN20)
+# Role: Docker host — corpweb, esite, odoo, nextcloud, mysql, redis, nfs
+# Apply: sudo cp containers.yaml /etc/netplan/99-neutron.yaml && sudo netplan apply
+#
+# Adjust 'enp0s3' to match your actual interface: ip link show
+network:
+  version: 2
+  ethernets:
+    enp0s3:
+      addresses:
+        - 172.16.20.10/24
+      routes:
+        - to: 0.0.0.0/0
+          via: 172.16.20.1
+      nameservers:
+        addresses:
+          - 172.16.10.10
+          - 8.8.8.8
+      dhcp4: false

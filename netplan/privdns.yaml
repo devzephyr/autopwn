@@ -1,0 +1,19 @@
+# netplan config for privdns.neutron.local — 172.16.10.53 (VLAN10)
+# Role: internal authoritative DNS for neutron.local
+# Apply: sudo cp privdns.yaml /etc/netplan/99-neutron.yaml && sudo netplan apply
+#
+# Adjust 'enp0s3' to match your actual interface: ip link show
+network:
+  version: 2
+  ethernets:
+    enp0s3:
+      addresses:
+        - 172.16.10.53/24
+      routes:
+        - to: 0.0.0.0/0
+          via: 172.16.10.1
+      nameservers:
+        addresses:
+          - 127.0.0.1
+          - 8.8.8.8
+      dhcp4: false

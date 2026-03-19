@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# kali.sh — Provision script for kali.neutron.local (172.16.30.50)
+# kali.sh — Provision script for kali.neutron.local (172.16.40.50)
 # Ubuntu 22.04 (Kali packages layered on top), runs as root, fully unattended
 # Role: ATTACKER machine — all autopwn dependencies installed and ready
 # =============================================================================
