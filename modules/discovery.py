@@ -304,6 +304,8 @@ def _layer_forward_dns(
                         answers = resolver.resolve(fqdn, "A", lifetime=3)
                         for rdata in answers:
                             ip = str(rdata)
+                            if not _is_private_ip(ip):
+                                continue  # ignore public IPs — we only care about internal hosts
                             if ip not in hosts and ip not in new_hosts:
                                 new_hosts[ip] = {
                                     "ip": ip,
