@@ -485,6 +485,16 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
         for cmd in host_entry.get("commands_run", []):
             raw_text += cmd.get("output", "") + "\n"
 
+    # Collect IPs seen only as local interface addresses (e.g. Docker bridges)
+    # so we can exclude subnets where the only host is the gateway itself.
+    local_iface_ips: set[str] = set()
+    iface_pattern = re.compile(
+        r"inet\s+(\d{1,3}(?:\.\d{1,3}){3})/\d+",
+    )
+    for m in iface_pattern.finditer(raw_text):
+        local_iface_ips.add(m.group(1))
+
+    subnet_ips: dict[str, set[str]] = {}
     for match in ip_pattern.finditer(raw_text):
         ip_str = match.group(1)
         try:
@@ -494,11 +504,18 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
         # Skip loopback, link-local, multicast, and broadcast
         if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.packed[-1] == 255:
             continue
-        # Derive the /24 containing this IP
         net = ipaddress.IPv4Network(f"{ip_str}/24", strict=False)
         cidr_str = str(net)
-        if cidr_str not in known_cidrs:
-            new_cidrs.add(cidr_str)
+        subnet_ips.setdefault(cidr_str, set()).add(ip_str)
+
+    for cidr_str, ips in subnet_ips.items():
+        if cidr_str in known_cidrs:
+            continue
+        # Skip subnets where every seen IP is a local interface address
+        # (catches Docker bridge networks: 172.17/18/19 etc.)
+        if ips.issubset(local_iface_ips):
+            continue
+        new_cidrs.add(cidr_str)
 
     return new_cidrs
 

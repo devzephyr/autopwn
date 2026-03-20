@@ -75,7 +75,7 @@ SCORING_RULES: dict[str, list[tuple[str, int]]] = {
     ],
     "winrm_creds": [
         ("port_5985_open",        1),
-        ("credentials_available", 3),
+        ("credentials_available", 2),
     ],
     "mssql_default": [
         ("port_1433_open",          1),
@@ -92,7 +92,7 @@ SCORING_RULES: dict[str, list[tuple[str, int]]] = {
     ],
     "rdp_creds": [
         ("port_3389_open",        1),
-        ("credentials_available", 3),
+        ("credentials_available", 2),
     ],
     "nfs_unauth": [
         ("port_2049_open",       1),
