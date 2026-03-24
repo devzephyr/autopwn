@@ -576,30 +576,33 @@
         <div class="card shadow-sm">
           <div class="card-body">
             <ul class="list-group list-group-flush">
-              {% for event in timeline_events %}
+              {% for entry in timeline_events %}
               <li class="list-group-item px-0">
-                <div class="timeline-item {{ 'success' if event.success is defined and event.success else
-                                             'failure' if event.success is defined and not event.success else '' }}">
+                <div class="timeline-item {{ 'success' if entry.status in ('success', 'converged', 'done') else 'failure' if entry.status in ('error', 'failure') else '' }}">
                   <div class="d-flex flex-wrap align-items-start gap-2">
                     <span class="text-muted small text-nowrap" style="min-width:160px;">
-                      {{ event.timestamp | default('—') }}
+                      {{ entry.timestamp | default('—') }}
                     </span>
                     <div>
-                      {% if event.stage is defined %}
-                        <span class="badge bg-light text-dark border me-1">{{ event.stage }}</span>
+                      {% if entry.stage is defined and entry.stage %}
+                        <span class="badge bg-light text-dark border me-1">{{ entry.stage }}</span>
                       {% endif %}
-                      {% if event.host is defined %}
-                        <code class="me-1">{{ event.host }}</code>
-                      {% endif %}
-                      {% if event.technique is defined %}
-                        <span class="badge bg-secondary me-1">{{ event.technique }}</span>
-                      {% endif %}
-                      <span>{{ event.message | default(event.action | default('')) }}</span>
-                      {% if event.success is defined %}
-                        {% if event.success %}
-                          <span class="badge bg-success ms-1">OK</span>
-                        {% else %}
-                          <span class="badge bg-danger ms-1">FAIL</span>
+                      <span>{{ entry.event | default('') }}</span>
+                      {% if entry.status is defined %}
+                        {% if entry.status in ('success', 'converged', 'done') %}
+                          <span class="badge bg-success ms-1">{{ entry.status | upper }}</span>
+                        {% elif entry.status in ('error', 'failure') %}
+                          <span class="badge bg-danger ms-1">{{ entry.status | upper }}</span>
+                        {% elif entry.status == 'skip' %}
+                          <span class="badge bg-warning text-dark ms-1">SKIP</span>
+                        {% elif entry.status == 'dry_run' %}
+                          <span class="badge bg-info text-dark ms-1">DRY-RUN</span>
+                        {% elif entry.status == 'pivot' %}
+                          <span class="badge bg-purple ms-1" style="background-color:#534AB7;color:#fff;">PIVOT</span>
+                        {% elif entry.status == 'attempt' %}
+                          <span class="badge bg-secondary ms-1">ATTEMPT</span>
+                        {% elif entry.status == 'start' %}
+                          <span class="badge bg-light text-dark border ms-1">START</span>
                         {% endif %}
                       {% endif %}
                     </div>

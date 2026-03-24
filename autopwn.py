@@ -277,16 +277,30 @@ def _run_stage(
 # ---------------------------------------------------------------------------
 # Map attack path names to (module_path, function_name)
 EXPLOIT_DISPATCH: dict[str, tuple[str, str]] = {
-    "ms17_010":        ("modules.exploits.smb",      "exploit_ms17_010"),
-    "kerberoast":      ("modules.exploits.smb",      "exploit_ms17_010"),   # placeholder; kerberoast is AD-side
-    "wordpress_creds": ("modules.exploits.web",      "exploit_wordpress"),
-    "dvwa_sqli":       ("modules.exploits.web",      "exploit_dvwa"),
-    "mysql_default":   ("modules.exploits.database", "exploit_mysql"),
-    "redis_unauth":    ("modules.exploits.database", "exploit_redis"),
-    "ssh_brute":       ("modules.exploits.ssh",      "exploit_ssh"),
-    "smb_null":        ("modules.exploits.smb",      "exploit_smb_null"),
-    "ftp_anon":        ("modules.exploits.smb",      "exploit_ftp_anon"),   # placeholder
-    "winrm_creds":     ("modules.exploits.winrm",    "exploit_winrm"),
+    # SMB exploits
+    "ms17_010":        ("modules.exploits.smb",       "exploit_ms17_010"),
+    "smb_null":        ("modules.exploits.smb",       "exploit_smb_null"),
+    "smb_shares":      ("modules.exploits.smb",       "exploit_smb_shares"),
+    # Web exploits
+    "wordpress_creds": ("modules.exploits.web",       "exploit_wordpress"),
+    "dvwa_sqli":       ("modules.exploits.web",       "exploit_dvwa"),
+    # Database exploits
+    "mysql_default":   ("modules.exploits.database",  "exploit_mysql"),
+    "redis_unauth":    ("modules.exploits.database",  "exploit_redis"),
+    # Remote access exploits
+    "ssh_brute":       ("modules.exploits.ssh",       "exploit_ssh"),
+    "winrm_creds":     ("modules.exploits.winrm",     "exploit_winrm"),
+    # MSSQL
+    "mssql_default":   ("modules.exploits.mssql",     "exploit_mssql"),
+    # RDP (both credential and BlueKeep paths use the same entry point)
+    "rdp_creds":       ("modules.exploits.rdp",       "exploit_rdp"),
+    "rdp_bluekeep":    ("modules.exploits.rdp",       "exploit_rdp"),
+    # NFS
+    "nfs_unauth":      ("modules.exploits.nfs",       "exploit_nfs"),
+    # Nextcloud
+    "nextcloud_creds": ("modules.exploits.nextcloud", "exploit_nextcloud"),
+    # REMOVED: "kerberoast" — runs inside ad_enum.py Stage 3, not a standalone exploit
+    # REMOVED: "ftp_anon"   — detected by NSE enrichment, no exploit module exists
 }
 
 def run_exploits(attack_plan: dict, lhost: str, dry_run: bool) -> None:
@@ -357,9 +371,21 @@ def run_exploits(attack_plan: dict, lhost: str, dry_run: bool) -> None:
             if technique == "ms17_010":
                 result = fn(host, lhost)
             elif technique == "winrm_creds":
-                # Gather credentials from ad_findings / earlier exploitation
                 creds = _collect_credentials()
                 result = fn(host, creds)
+            elif technique in ("rdp_creds", "rdp_bluekeep"):
+                creds = _collect_credentials()
+                # exploit_rdp needs os_guess and nse_results for BlueKeep detection
+                host_data = _find_host_data(host)
+                result = fn(
+                    host,
+                    credentials=creds,
+                    os_guess=host_data.get("os_guess", ""),
+                    nse_results=host_data.get("nse_3389", {}),
+                )
+            elif technique == "smb_shares":
+                creds = _collect_credentials()
+                result = fn(host, credentials=creds)
             else:
                 result = fn(host)
         except Exception as exc:
@@ -400,6 +426,21 @@ def _collect_credentials() -> list[dict]:
             for c in r.get("credentials_recovered", []):
                 creds.append(c)
     return creds
+
+def _find_host_data(target_ip: str) -> dict:
+    """Look up a host's os_guess and port 3389 NSE results from services.json."""
+    data = _load_json(STATE_FILES["services"])
+    if not data:
+        return {}
+    for h in data.get("hosts", []):
+        if h.get("ip") == target_ip:
+            nse_3389 = {}
+            for p in h.get("ports", []):
+                if p.get("port") == 3389:
+                    nse_3389 = p.get("nse_results", {})
+                    break
+            return {"os_guess": h.get("os_guess", ""), "nse_3389": nse_3389}
+    return {}
 
 # ---------------------------------------------------------------------------
 # Print banner
