@@ -16,7 +16,6 @@ from jinja2 import Environment, FileSystemLoader
 SEVERITY = {
     "ms17_010":        "Critical",
     "kerberoast":      "Critical",
-    "dvwa_sqli":       "High",
     "wordpress_creds": "High",
     "winrm_creds":     "High",
     "mysql_default":   "High",

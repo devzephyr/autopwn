@@ -49,10 +49,6 @@ SCORING_RULES: dict[str, list[tuple[str, int]]] = {
         ("wordpress_fingerprint",  2),
         ("wp_login_accessible",    1),
     ],
-    "dvwa_sqli": [
-        ("port_80_443_open",   1),
-        ("dvwa_fingerprint",   3),
-    ],
     "mysql_default": [
         ("port_3306_open",          1),
         ("mysql_empty_password_nse", 3),
@@ -126,7 +122,6 @@ SEVERITY: dict[str, str] = {
     "mssql_default":    "Critical",
     "mssql_xp_cmdshell": "Critical",
     "rdp_bluekeep":     "Critical",
-    "dvwa_sqli":        "High",
     "wordpress_creds":  "High",
     "winrm_creds":      "High",
     "mysql_default":    "High",
@@ -252,11 +247,6 @@ def _cond_wordpress_fingerprint(host, ports, nse):
 def _cond_wp_login_accessible(host, ports, nse):
     return _any_nse_contains(nse, "wp-login")
 
-def _cond_dvwa_fingerprint(host, ports, nse):
-    if host.get("flags", {}).get("has_dvwa"):
-        return True
-    return _any_nse_contains(nse, "dvwa")
-
 def _cond_mysql_empty_password_nse(host, ports, nse):
     val = nse.get("mysql-empty-password", "")
     return "empty password" in val.lower()
@@ -347,7 +337,6 @@ CONDITION_EVALUATORS: dict[str, callable] = {
     "port_80_443_open":          _cond_port_80_443_open,
     "wordpress_fingerprint":     _cond_wordpress_fingerprint,
     "wp_login_accessible":       _cond_wp_login_accessible,
-    "dvwa_fingerprint":          _cond_dvwa_fingerprint,
     "mysql_empty_password_nse":  _cond_mysql_empty_password_nse,
     "port_3306_open":            _cond_port_3306_open,
     "redis_no_auth_nse":         _cond_redis_no_auth_nse,

@@ -7,7 +7,7 @@ For each host discovered in Stage 1:
      plus dynamically selected NSE scripts based on open ports.
   3. Parse results into the services.json schema.
   4. Set application-level flags: is_domain_controller, has_wordpress,
-     has_dvwa, ms17_010_vulnerable.
+     ms17_010_vulnerable.
 
 Output: state/services.json
 """
@@ -147,15 +147,6 @@ def _set_flags(
         if "wp-login" in http_enum.lower() or "wordpress" in http_title.lower():
             has_wp = True
 
-    # has_dvwa: http-title contains "dvwa" OR http-enum contains "/dvwa/"
-    has_dvwa = False
-    for port_num in (80, 443):
-        scripts = nse_all.get(port_num, {})
-        http_title = scripts.get("http-title", "").lower()
-        http_enum = scripts.get("http-enum", "").lower()
-        if "dvwa" in http_title or "/dvwa/" in http_enum:
-            has_dvwa = True
-
     # has_nextcloud: http-title contains "nextcloud" OR http-enum finds
     # /nextcloud/ or /index.php/login with nextcloud markers
     has_nextcloud = False
@@ -216,7 +207,6 @@ def _set_flags(
     return {
         "is_domain_controller":  is_dc,
         "has_wordpress":         has_wp,
-        "has_dvwa":              has_dvwa,
         "has_nextcloud":         has_nextcloud,
         "ms17_010_vulnerable":   ms17,
         "has_mssql":             has_mssql,
@@ -400,7 +390,6 @@ def run() -> list[dict]:
                 "flags": {
                     "is_domain_controller":  False,
                     "has_wordpress":         False,
-                    "has_dvwa":              False,
                     "ms17_010_vulnerable":   False,
                     "has_mssql":             False,
                     "has_rdp":               False,

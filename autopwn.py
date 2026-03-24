@@ -283,7 +283,6 @@ EXPLOIT_DISPATCH: dict[str, tuple[str, str]] = {
     "smb_shares":      ("modules.exploits.smb",       "exploit_smb_shares"),
     # Web exploits
     "wordpress_creds": ("modules.exploits.web",       "exploit_wordpress"),
-    "dvwa_sqli":       ("modules.exploits.web",       "exploit_dvwa"),
     # Database exploits
     "mysql_default":   ("modules.exploits.database",  "exploit_mysql"),
     "redis_unauth":    ("modules.exploits.database",  "exploit_redis"),
