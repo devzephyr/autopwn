@@ -46,6 +46,8 @@ PORT_SCRIPTS: dict[int, str] = {
     3389: "rdp-enum-encryption,rdp-vuln-ms12-020",
     5985: "http-auth-finder",
     6379: "redis-info",
+    2375: "docker-version",
+    2376: "docker-version",
 }
 
 # All ports we care about (used for fast pre-scan port list)
@@ -193,6 +195,9 @@ def _set_flags(
         kw in _os_lower for kw in ("windows 7", "2008", "xp", "2003")
     )
 
+    # has_docker: port 2375 or 2376 open
+    has_docker = (2375 in open_port_nums) or (2376 in open_port_nums)
+
     # mssql_empty_password: ms-sql-empty-password NSE mentions "sa"
     mssql_ep_output = all_nse.get("ms-sql-empty-password", "")
     mssql_empty_password = "sa" in mssql_ep_output.lower() or "empty" in mssql_ep_output.lower()
@@ -213,6 +218,7 @@ def _set_flags(
         "has_rdp":               has_rdp,
         "has_nfs":               has_nfs,
         "has_smb_shares":        has_smb_shares,
+        "has_docker":            has_docker,
         "bluekeep_vulnerable":   bluekeep_vulnerable,
         "mssql_empty_password":  mssql_empty_password,
         "nfs_world_readable":    nfs_world_readable,
@@ -395,6 +401,7 @@ def run() -> list[dict]:
                     "has_rdp":               False,
                     "has_nfs":               False,
                     "has_smb_shares":        False,
+                    "has_docker":            False,
                     "has_nextcloud":         False,
                     "bluekeep_vulnerable":   False,
                     "mssql_empty_password":  False,

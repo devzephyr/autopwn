@@ -24,6 +24,10 @@ SEVERITY = {
     "smb_null":        "Medium",
     "ftp_anon":        "Medium",
     "snmp_default":    "Low",
+    "snmp_community":  "Medium",
+    "docker_unauth":   "Critical",
+    "password_spray":  "High",
+    "kerbrute_spray":  "High",
 }
 
 # Bootstrap badge classes keyed by severity label

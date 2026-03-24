@@ -298,8 +298,14 @@ EXPLOIT_DISPATCH: dict[str, tuple[str, str]] = {
     "nfs_unauth":      ("modules.exploits.nfs",       "exploit_nfs"),
     # Nextcloud
     "nextcloud_creds": ("modules.exploits.nextcloud", "exploit_nextcloud"),
-    # REMOVED: "kerberoast" — runs inside ad_enum.py Stage 3, not a standalone exploit
-    # REMOVED: "ftp_anon"   — detected by NSE enrichment, no exploit module exists
+    # SNMP
+    "snmp_community":  ("modules.exploits.snmp",      "exploit_snmp"),
+    # Docker
+    "docker_unauth":   ("modules.exploits.docker",    "exploit_docker"),
+    # Password spray
+    "password_spray":  ("modules.exploits.spray",     "exploit_spray"),
+    # Kerberos spray
+    "kerbrute_spray":  ("modules.exploits.kerbrute",  "exploit_kerbrute"),
 }
 
 def run_exploits(attack_plan: dict, lhost: str, dry_run: bool) -> None:

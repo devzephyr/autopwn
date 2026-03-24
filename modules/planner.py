@@ -111,6 +111,24 @@ SCORING_RULES: dict[str, list[tuple[str, int]]] = {
         ("port_80_443_open",        1),
         ("nextcloud_fingerprint",   2),
     ],
+    "snmp_community": [
+        ("port_161_open",          1),
+        ("snmp_info_nse",          3),
+    ],
+    "docker_unauth": [
+        ("port_2375_2376_open",    1),
+        ("docker_api_accessible",  3),
+    ],
+    "password_spray": [
+        ("multiple_services_open", 1),
+        ("credentials_available",  2),
+        ("ssh_password_auth_allowed", 1),
+    ],
+    "kerbrute_spray": [
+        ("port_88_open",              1),
+        ("ldap_enumeration_success",  2),
+        ("ad_users_enumerated",       1),
+    ],
 }
 
 # ---------------------------------------------------------------------------
@@ -136,6 +154,10 @@ SEVERITY: dict[str, str] = {
     "ftp_anon":         "Medium",
     "nfs_enum":         "Medium",
     "snmp_default":     "Low",
+    "snmp_community":   "Medium",
+    "docker_unauth":    "Critical",
+    "password_spray":   "High",
+    "kerbrute_spray":   "High",
 }
 
 # ---------------------------------------------------------------------------
@@ -324,6 +346,28 @@ def _cond_nextcloud_fingerprint(host, ports, nse):
             return True
     return False
 
+def _cond_port_161_open(host, ports, nse):
+    return 161 in ports
+
+def _cond_snmp_info_nse(host, ports, nse):
+    return "snmp-info" in nse
+
+def _cond_port_2375_2376_open(host, ports, nse):
+    return 2375 in ports or 2376 in ports
+
+def _cond_docker_api_accessible(host, ports, nse):
+    return bool(host.get("flags", {}).get("has_docker"))
+
+def _cond_multiple_services_open(host, ports, nse):
+    """True if the host has 2+ sprayable services open."""
+    sprayable = {22, 445, 5985, 3306, 1433}
+    return len(ports & sprayable) >= 2
+
+def _cond_ad_users_enumerated(host, ports, nse):
+    if _ad_findings is None:
+        return False
+    return len(_ad_findings.get("users", [])) >= 3
+
 
 # Map condition name -> evaluator function
 CONDITION_EVALUATORS: dict[str, callable] = {
@@ -356,6 +400,12 @@ CONDITION_EVALUATORS: dict[str, callable] = {
     "bluekeep_vulnerable":       _cond_bluekeep_vulnerable,
     "nfs_world_readable_nse":    _cond_nfs_world_readable_nse,
     "nextcloud_fingerprint":     _cond_nextcloud_fingerprint,
+    "port_161_open":             _cond_port_161_open,
+    "snmp_info_nse":             _cond_snmp_info_nse,
+    "port_2375_2376_open":       _cond_port_2375_2376_open,
+    "docker_api_accessible":     _cond_docker_api_accessible,
+    "multiple_services_open":    _cond_multiple_services_open,
+    "ad_users_enumerated":       _cond_ad_users_enumerated,
 }
 
 # ---------------------------------------------------------------------------
