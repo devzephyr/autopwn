@@ -278,15 +278,16 @@ def _run_stage(
 # Map attack path names to (module_path, function_name)
 EXPLOIT_DISPATCH: dict[str, tuple[str, str]] = {
     "ms17_010":        ("modules.exploits.smb",      "exploit_ms17_010"),
-    "kerberoast":      ("modules.exploits.smb",      "exploit_ms17_010"),   # placeholder; kerberoast is AD-side
+    # kerberoast is handled inside ad_enum.py (Stage 3), not dispatched as an exploit
     "wordpress_creds": ("modules.exploits.web",      "exploit_wordpress"),
     "dvwa_sqli":       ("modules.exploits.web",      "exploit_dvwa"),
     "mysql_default":   ("modules.exploits.database", "exploit_mysql"),
     "redis_unauth":    ("modules.exploits.database", "exploit_redis"),
     "ssh_brute":       ("modules.exploits.ssh",      "exploit_ssh"),
     "smb_null":        ("modules.exploits.smb",      "exploit_smb_null"),
-    "ftp_anon":        ("modules.exploits.smb",      "exploit_ftp_anon"),   # placeholder
+    "ftp_anon":        ("modules.exploits.smb",      "exploit_ftp_anon"),
     "winrm_creds":     ("modules.exploits.winrm",    "exploit_winrm"),
+    "rdp_creds":       ("modules.exploits.rdp",      "exploit_rdp"),
 }
 
 def run_exploits(attack_plan: dict, lhost: str, dry_run: bool) -> None:
@@ -356,7 +357,7 @@ def run_exploits(attack_plan: dict, lhost: str, dry_run: bool) -> None:
             # Build kwargs based on technique requirements
             if technique == "ms17_010":
                 result = fn(host, lhost)
-            elif technique == "winrm_creds":
+            elif technique in ("winrm_creds", "rdp_creds"):
                 # Gather credentials from ad_findings / earlier exploitation
                 creds = _collect_credentials()
                 result = fn(host, creds)

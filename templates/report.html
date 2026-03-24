@@ -578,8 +578,8 @@
             <ul class="list-group list-group-flush">
               {% for event in timeline_events %}
               <li class="list-group-item px-0">
-                <div class="timeline-item {{ 'success' if event.success is defined and event.success else
-                                             'failure' if event.success is defined and not event.success else '' }}">
+                <div class="timeline-item {{ 'success' if event.status is defined and event.status == 'success' else
+                                             'failure' if event.status is defined and event.status == 'error' else '' }}">
                   <div class="d-flex flex-wrap align-items-start gap-2">
                     <span class="text-muted small text-nowrap" style="min-width:160px;">
                       {{ event.timestamp | default('—') }}
@@ -594,12 +594,14 @@
                       {% if event.technique is defined %}
                         <span class="badge bg-secondary me-1">{{ event.technique }}</span>
                       {% endif %}
-                      <span>{{ event.message | default(event.action | default('')) }}</span>
-                      {% if event.success is defined %}
-                        {% if event.success %}
+                      <span>{{ event.event | default('') }}</span>
+                      {% if event.status is defined %}
+                        {% if event.status == 'success' %}
                           <span class="badge bg-success ms-1">OK</span>
-                        {% else %}
+                        {% elif event.status == 'error' or event.status == 'failure' %}
                           <span class="badge bg-danger ms-1">FAIL</span>
+                        {% elif event.status == 'skip' %}
+                          <span class="badge bg-secondary ms-1">SKIP</span>
                         {% endif %}
                       {% endif %}
                     </div>

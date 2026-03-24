@@ -1,19 +1,39 @@
 #!/bin/bash
 # wp_setup.sh
 # Run this ONCE after docker compose up to configure WordPress with weak credentials
-# The WordPress container needs ~60 seconds to finish initial setup before running this
+# Waits for WordPress to become ready before running WP-CLI setup
 
 set -e
 
-WP_CONTAINER="autopwn_wordpress"
-SITE_URL="http://172.28.0.31"
+WP_CONTAINER="${WP_CONTAINER:-autopwn_wordpress}"
+# Auto-detect the container's IP rather than hardcoding one
+SITE_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$WP_CONTAINER" 2>/dev/null)
+if [ -z "$SITE_IP" ]; then
+    echo "[-] Could not detect IP for container '$WP_CONTAINER'. Is it running?"
+    exit 1
+fi
+SITE_URL="http://${SITE_IP}"
 ADMIN_USER="admin"
 ADMIN_PASS="password"       # intentionally weak - on wordlist
 ADMIN_EMAIL="admin@neutron.local"
 SITE_TITLE="Neutron Corp Intranet"
 
+echo "[*] Detected WordPress container IP: $SITE_IP"
 echo "[*] Waiting for WordPress to finish initialising..."
-sleep 60
+
+# Poll for readiness instead of a fixed sleep
+MAX_WAIT=120
+ELAPSED=0
+until curl -sf "${SITE_URL}/wp-login.php" >/dev/null 2>&1; do
+    if [ "$ELAPSED" -ge "$MAX_WAIT" ]; then
+        echo "[-] WordPress did not become ready within ${MAX_WAIT}s"
+        exit 1
+    fi
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+    echo "    ... waiting (${ELAPSED}s)"
+done
+echo "[+] WordPress is responding after ${ELAPSED}s"
 
 echo "[*] Installing WP-CLI into container..."
 docker exec $WP_CONTAINER bash -c "
@@ -47,4 +67,4 @@ echo "    URL:      $SITE_URL"
 echo "    User:     $ADMIN_USER"
 echo "    Password: $ADMIN_PASS"
 echo ""
-echo "[*] Verify manually: curl -s http://localhost:8081/wp-login.php | grep -i 'login'"
+echo "[*] Verify manually: curl -s ${SITE_URL}/wp-login.php | grep -i 'login'"
