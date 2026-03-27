@@ -386,6 +386,10 @@ def run_exploits(attack_plan: dict, lhost: str, dry_run: bool) -> None:
             elif technique == "smb_shares":
                 creds = _collect_credentials()
                 result = fn(host, credentials=creds)
+            elif technique in ("wordpress_creds", "dvwa_sqli"):
+                # Determine the best port from services data
+                port = _get_web_port(host)
+                result = fn(host, port=port)
             else:
                 result = fn(host)
         except Exception as exc:
@@ -426,6 +430,21 @@ def _collect_credentials() -> list[dict]:
             for c in r.get("credentials_recovered", []):
                 creds.append(c)
     return creds
+
+def _get_web_port(target_ip: str) -> int:
+    """Return the best HTTP(S) port for a host — prefer 443 over 80."""
+    data = _load_json(STATE_FILES["services"])
+    if not data:
+        return 80
+    for h in data.get("hosts", []):
+        if h.get("ip") == target_ip:
+            open_ports = {p["port"] for p in h.get("ports", []) if p.get("state") == "open"}
+            if 443 in open_ports:
+                return 443
+            if 80 in open_ports:
+                return 80
+    return 80
+
 
 def _find_host_data(target_ip: str) -> dict:
     """Look up a host's os_guess and port 3389 NSE results from services.json."""
@@ -542,8 +561,11 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
 
     # Collect IPs from tun/tap interfaces so we can exclude VPN pool subnets
     tun_ips: set[str] = set()
+    # Match "inet <IP>" on any line that follows a tun interface header,
+    # or on the same line as a tun reference (ip addr output)
     tun_ip_re = re.compile(
-        r"tun\d*.*?inet\s+(\d{1,3}(?:\.\d{1,3}){3})", re.DOTALL
+        r"inet\s+(\d{1,3}(?:\.\d{1,3}){3})(?:/\d+)?\s+.*?tun\d*"
+        r"|tun\d*[^\n]*inet\s+(\d{1,3}(?:\.\d{1,3}){3})"
     )
 
     # Collect text from route/addr commands specifically, and all text for fallback
@@ -556,17 +578,31 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
             command = cmd.get("command", "")
             if any(k in command for k in ("ip addr", "ip route", "ipconfig")):
                 route_text += output + "\n"
-                # Collect tun interface IPs
+                # Collect tun interface IPs (regex has two groups, one will be None)
                 for m in tun_ip_re.finditer(output):
-                    tun_ips.add(m.group(1))
+                    ip = m.group(1) or m.group(2)
+                    if ip:
+                        tun_ips.add(ip)
 
     # Build set of tun-associated CIDRs by checking if "tun" appears near the CIDR
-    # in ip route output (e.g. "172.16.12.48/28 dev tun0 proto kernel...")
-    tun_cidr_re = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\s+dev\s+tun")
+    # in ip route output.  Match both formats:
+    #   "172.16.12.48/28 dev tun0 proto kernel..."
+    #   "172.16.12.0/27 via 172.16.12.50 dev tun0"
+    tun_cidr_re = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\b[^\n]*\bdev\s+tun\d*")
     tun_cidrs: set[str] = set()
     for m in tun_cidr_re.finditer(route_text):
         try:
             tun_cidrs.add(str(ipaddress.IPv4Network(m.group(1), strict=False)))
+        except ValueError:
+            pass
+    # Also filter subnets that contain any tun interface IP
+    for tun_ip in tun_ips:
+        try:
+            ip_obj = ipaddress.IPv4Address(tun_ip)
+            # Check common VPN pool sizes: /28, /27, /24
+            for prefix in (28, 27, 24):
+                net = ipaddress.IPv4Network(f"{tun_ip}/{prefix}", strict=False)
+                tun_cidrs.add(str(net))
         except ValueError:
             pass
 
@@ -797,6 +833,8 @@ def _connect_vpn(ovpn_path: Path, timeout: int = 30) -> bool:
     cmd += ["--pull-filter", "ignore", "dhcp-option"]
     cmd += ["--pull-filter", "ignore", "block-outside-dns"]
     cmd += ["--tls-cert-profile", "insecure"]
+    # Required for tls-verify /bin/true to execute (OpenVPN >= 2.1)
+    cmd += ["--script-security", "2"]
 
     log_path = STATE_DIR / "vpn_pivot" / "openvpn.log"
     try:
