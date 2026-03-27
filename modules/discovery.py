@@ -11,6 +11,7 @@ Five layers all run and results are merged/deduplicated by IP:
 Output: state/discovery.json
 """
 
+import ipaddress
 import json
 import os
 import pathlib
@@ -34,6 +35,15 @@ OUTPUT_FILE = STATE_DIR / "discovery.json"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _is_private_ip(ip_str: str) -> bool:
+    """Return True if the IP is RFC 1918 private or link-local. Rejects public IPs."""
+    try:
+        addr = ipaddress.IPv4Address(ip_str)
+        return addr.is_private and not addr.is_loopback
+    except ValueError:
+        return False
+
 
 def _atomic_write(path: pathlib.Path, data: dict) -> None:
     """Write JSON atomically: write to .tmp then os.rename."""
@@ -215,7 +225,9 @@ def _find_dns_servers(hosts: dict[str, dict]) -> list[str]:
 
 # Generic internal suffixes — tried in order when no hostname has been resolved yet.
 # These are standard RFC-1918 / enterprise conventions, not topology-specific.
-_CANDIDATE_SUFFIXES = ["local", "internal", "corp", "lan", "ad", "home", "intranet"]
+# NOTE: "ad" was removed because .ad is the real TLD for Andorra, and querying
+# e.g. "corp.ad" against a recursive resolver returns public IPs.
+_CANDIDATE_SUFFIXES = ["local", "internal", "corp", "lan", "home", "intranet"]
 
 
 def _discover_zone(dns_ip: str) -> list[str]:
@@ -304,6 +316,8 @@ def _layer_forward_dns(
                         answers = resolver.resolve(fqdn, "A", lifetime=3)
                         for rdata in answers:
                             ip = str(rdata)
+                            if not _is_private_ip(ip):
+                                continue  # NEVER add public IPs
                             if ip not in hosts and ip not in new_hosts:
                                 new_hosts[ip] = {
                                     "ip": ip,
@@ -323,7 +337,7 @@ def _layer_forward_dns(
                 fqdn = f"{name}.{suffix}" if suffix else name
                 try:
                     ip = socket.gethostbyname(fqdn)
-                    if ip and ip not in hosts and ip not in new_hosts:
+                    if ip and _is_private_ip(ip) and ip not in hosts and ip not in new_hosts:
                         new_hosts[ip] = {
                             "ip": ip,
                             "hostname": fqdn,
@@ -357,7 +371,7 @@ def _dns_zone_transfer(dns_servers: list[str], discovered_hosts: dict) -> list[d
                     domains_to_try.add(".".join(parts[-3:]))   # e.g. corp.neutron.local
 
         if not domains_to_try:
-            domains_to_try = {"local", "internal", "corp", "lan", "ad", "domain"}
+            domains_to_try = {"local", "internal", "corp", "lan", "domain"}
 
         for domain in domains_to_try:
             try:
@@ -374,6 +388,8 @@ def _dns_zone_transfer(dns_servers: list[str], discovered_hosts: dict) -> list[d
                             for rdata in rdataset:
                                 if hasattr(rdata, "address"):
                                     ip = rdata.address
+                                    if not _is_private_ip(ip):
+                                        continue
                                     hostname = f"{name}.{domain}".rstrip(".")
                                     if ip not in discovered_hosts:
                                         new_hosts.append({
@@ -400,6 +416,8 @@ def _dns_zone_transfer(dns_servers: list[str], discovered_hosts: dict) -> list[d
                                 hostname = parts_line[0].rstrip(".")
                                 # Skip if already captured by dnspython or known
                                 already_new = any(h["ip"] == ip for h in new_hosts)
+                                if not _is_private_ip(ip):
+                                    continue
                                 if ip not in discovered_hosts and not already_new:
                                     new_hosts.append({
                                         "ip": ip,
