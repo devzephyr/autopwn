@@ -540,6 +540,12 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
         r"\b(\d{1,3}(?:\.\d{1,3}){3})\s+(255\.\d{1,3}\.\d{1,3}\.\d{1,3})\b"
     )
 
+    # Collect IPs from tun/tap interfaces so we can exclude VPN pool subnets
+    tun_ips: set[str] = set()
+    tun_ip_re = re.compile(
+        r"tun\d*.*?inet\s+(\d{1,3}(?:\.\d{1,3}){3})", re.DOTALL
+    )
+
     # Collect text from route/addr commands specifically, and all text for fallback
     route_text = ""
     all_text = ""
@@ -550,6 +556,19 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
             command = cmd.get("command", "")
             if any(k in command for k in ("ip addr", "ip route", "ipconfig")):
                 route_text += output + "\n"
+                # Collect tun interface IPs
+                for m in tun_ip_re.finditer(output):
+                    tun_ips.add(m.group(1))
+
+    # Build set of tun-associated CIDRs by checking if "tun" appears near the CIDR
+    # in ip route output (e.g. "172.16.12.48/28 dev tun0 proto kernel...")
+    tun_cidr_re = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\s+dev\s+tun")
+    tun_cidrs: set[str] = set()
+    for m in tun_cidr_re.finditer(route_text):
+        try:
+            tun_cidrs.add(str(ipaddress.IPv4Network(m.group(1), strict=False)))
+        except ValueError:
+            pass
 
     # Strategy 1+2: extract explicit CIDRs from route/addr output
     for match in cidr_pattern.finditer(route_text):
@@ -565,6 +584,9 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
         if _should_ignore(net):
             continue
         normalized = str(net)
+        # Skip VPN pool subnets (tun-associated routes like 172.16.12.48/28)
+        if normalized in tun_cidrs:
+            continue
         if normalized not in known_cidrs:
             new_cidrs.add(normalized)
 
@@ -598,6 +620,9 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
         except ValueError:
             continue
         if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.packed[-1] == 255:
+            continue
+        # Skip IPs from tun interfaces (VPN pool addresses)
+        if ip_str in tun_ips:
             continue
         net = ipaddress.IPv4Network(f"{ip_str}/24", strict=False)
         if _should_ignore(net):
@@ -750,8 +775,27 @@ def _connect_vpn(ovpn_path: Path, timeout: int = 30) -> bool:
     cmd += ["--pull-filter", "ignore", "dhcp-option"]
     # Ignore pushed block-outside-dns (Windows-only, causes warnings on Linux)
     cmd += ["--pull-filter", "ignore", "block-outside-dns"]
-    # Lab environments often use internal CAs with non-standard cert profiles.
-    # Without this, OpenVPN rejects the server cert with "certificate verify failed".
+    # Lab environments often use internal CAs with incomplete cert chains.
+    # The <ca> block in stolen .ovpn configs may not include intermediate CAs,
+    # causing "certificate verify failed". We patch the config to disable
+    # strict verification — this is what a real pentester would do with a
+    # recovered VPN config.
+    patched_ovpn = ovpn_path.parent / (ovpn_path.stem + "_patched.ovpn")
+    patched_text = ovpn_text
+    # Disable remote-cert-tls (EKU check that fails with internal certs)
+    patched_text = patched_text.replace("remote-cert-tls server", "# remote-cert-tls server")
+    # Disable cert verification via tls-verify override
+    if "tls-verify" not in patched_text:
+        patched_text += "\ntls-verify /bin/true\n"
+    patched_ovpn.write_text(patched_text)
+    cmd = ["openvpn", "--config", str(patched_ovpn)]
+
+    # Re-add the pull filters on the patched config
+    if "redirect-gateway" in ovpn_text:
+        info("Config contains redirect-gateway — adding --pull-filter to ignore it")
+        cmd += ["--pull-filter", "ignore", "redirect-gateway"]
+    cmd += ["--pull-filter", "ignore", "dhcp-option"]
+    cmd += ["--pull-filter", "ignore", "block-outside-dns"]
     cmd += ["--tls-cert-profile", "insecure"]
 
     log_path = STATE_DIR / "vpn_pivot" / "openvpn.log"
