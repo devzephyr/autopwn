@@ -467,26 +467,31 @@ def run(cidr: str) -> list[dict]:
     # --- Layer 3: Reverse DNS ---
     _layer_reverse_dns(hosts)
 
-    # --- Layer 4: Forward DNS brute-force ---
+    # --- Layer 4: DNS enumeration (AXFR first, brute-force as fallback) ---
     dns_servers = _find_dns_servers(hosts)
-    dns_new = _layer_forward_dns(hosts, dns_servers, cidr)
-    # Reverse-DNS the newly discovered hosts too
-    _layer_reverse_dns(dns_new)
-    hosts.update(dns_new)
 
-    # --- Layer 4b: DNS Zone Transfer (AXFR) ---
+    # Try AXFR first — one query returns all records, much faster than brute-force
+    axfr_found = 0
     print(f"  [Layer 4b] DNS Zone Transfer (AXFR) against {len(dns_servers)} server(s).")
     if dns_servers:
         axfr_new = _dns_zone_transfer(dns_servers, hosts)
-        # Reverse-DNS any newly found hosts that lack a hostname
         axfr_new_dict: dict[str, dict] = {h["ip"]: h for h in axfr_new}
         _layer_reverse_dns(axfr_new_dict)
         for ip, record in axfr_new_dict.items():
             if ip not in hosts:
                 hosts[ip] = record
-        print(f"  [Layer 4b] AXFR added {len(axfr_new_dict)} new host(s).")
+        axfr_found = len(axfr_new_dict)
+        print(f"  [Layer 4b] AXFR added {axfr_found} new host(s).")
     else:
         print("  [Layer 4b] No DNS servers found; skipping zone transfer.")
+
+    # Only run the slow 61-name brute-force if AXFR didn't return anything
+    if axfr_found == 0:
+        dns_new = _layer_forward_dns(hosts, dns_servers, cidr)
+        _layer_reverse_dns(dns_new)
+        hosts.update(dns_new)
+    else:
+        print(f"  [Layer 4] Skipping DNS brute-force — AXFR already returned {axfr_found} host(s).")
 
     # Build final sorted host list
     host_list = sorted(hosts.values(), key=lambda h: tuple(int(o) for o in h["ip"].split(".")))
