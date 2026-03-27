@@ -519,6 +519,21 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
     cidr_pattern = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\b")
     ip_pattern = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 
+    # Networks to ignore: Docker bridges (172.17-19.x.x/16), VPN pools,
+    # and any /32 peer addresses
+    _IGNORE_PREFIXES = ("172.17.", "172.18.", "172.19.", "172.20.",
+                        "10.8.", "10.9.")  # common OpenVPN pools
+
+    def _should_ignore(net: ipaddress.IPv4Network) -> bool:
+        """Filter out Docker bridges, VPN pools, and noise."""
+        net_str = str(net.network_address)
+        if any(net_str.startswith(p) for p in _IGNORE_PREFIXES):
+            return True
+        # /16 or larger subnets from post-ex are almost always Docker bridges
+        if net.prefixlen <= 16:
+            return True
+        return False
+
     # Regex for netmask notation: "route 172.16.12.0 255.255.255.224" or
     # "Subnet Mask . . . : 255.255.255.224" paired with an IP on a nearby line
     netmask_route_re = re.compile(
@@ -547,6 +562,8 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
             continue
         if net.prefixlen >= 32 or net.prefixlen < 8:
             continue
+        if _should_ignore(net):
+            continue
         normalized = str(net)
         if normalized not in known_cidrs:
             new_cidrs.add(normalized)
@@ -562,6 +579,8 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
         if net.is_loopback or net.is_link_local or net.is_multicast:
             continue
         if net.prefixlen >= 32 or net.prefixlen < 8:
+            continue
+        if _should_ignore(net):
             continue
         normalized = str(net)
         if normalized not in known_cidrs:
@@ -581,6 +600,8 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
         if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.packed[-1] == 255:
             continue
         net = ipaddress.IPv4Network(f"{ip_str}/24", strict=False)
+        if _should_ignore(net):
+            continue
         cidr_str = str(net)
         if cidr_str not in known_cidrs:
             new_cidrs.add(cidr_str)
@@ -727,6 +748,11 @@ def _connect_vpn(ovpn_path: Path, timeout: int = 30) -> bool:
         cmd += ["--pull-filter", "ignore", "redirect-gateway"]
     # Always ignore pushed DNS to avoid breaking Kali's resolver
     cmd += ["--pull-filter", "ignore", "dhcp-option"]
+    # Ignore pushed block-outside-dns (Windows-only, causes warnings on Linux)
+    cmd += ["--pull-filter", "ignore", "block-outside-dns"]
+    # Lab environments often use internal CAs with non-standard cert profiles.
+    # Without this, OpenVPN rejects the server cert with "certificate verify failed".
+    cmd += ["--tls-cert-profile", "insecure"]
 
     log_path = STATE_DIR / "vpn_pivot" / "openvpn.log"
     try:
