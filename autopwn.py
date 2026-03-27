@@ -519,6 +519,12 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
     cidr_pattern = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\b")
     ip_pattern = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 
+    # Regex for netmask notation: "route 172.16.12.0 255.255.255.224" or
+    # "Subnet Mask . . . : 255.255.255.224" paired with an IP on a nearby line
+    netmask_route_re = re.compile(
+        r"\b(\d{1,3}(?:\.\d{1,3}){3})\s+(255\.\d{1,3}\.\d{1,3}\.\d{1,3})\b"
+    )
+
     # Collect text from route/addr commands specifically, and all text for fallback
     route_text = ""
     all_text = ""
@@ -545,7 +551,23 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
         if normalized not in known_cidrs:
             new_cidrs.add(normalized)
 
-    # If we found explicit CIDRs, prefer those over the /24 fallback
+    # Strategy 3: netmask notation (OpenVPN route push or Windows ipconfig)
+    # e.g. "route 172.16.12.0 255.255.255.224" -> 172.16.12.0/27
+    for match in netmask_route_re.finditer(route_text):
+        ip_str, mask_str = match.group(1), match.group(2)
+        try:
+            net = ipaddress.IPv4Network(f"{ip_str}/{mask_str}", strict=False)
+        except ValueError:
+            continue
+        if net.is_loopback or net.is_link_local or net.is_multicast:
+            continue
+        if net.prefixlen >= 32 or net.prefixlen < 8:
+            continue
+        normalized = str(net)
+        if normalized not in known_cidrs:
+            new_cidrs.add(normalized)
+
+    # If we found explicit CIDRs or netmask routes, prefer those over /24 fallback
     if new_cidrs:
         return new_cidrs
 
