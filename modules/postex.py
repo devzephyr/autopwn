@@ -146,7 +146,7 @@ def _parse_kiwi_output(text: str) -> list[dict]:
         # Skip obviously empty / placeholder passwords
         if not pw or pw in ("(null)", "*"):
             continue
-        key = (user.lower(), pw)
+        key = ((user or "").lower(), pw)
         if key not in seen:
             seen.add(key)
             creds.append({"username": user, "password": pw, "domain": domain, "type": "plaintext"})

