@@ -304,10 +304,10 @@ def run() -> list[dict]:
     reuse_events: list[dict] = []
 
     for cred in credentials:
-        username    = cred.get("username", "")
-        password    = cred.get("password", "")
-        domain      = cred.get("domain", "")
-        source_host = cred.get("source_host", "unknown")
+        username    = cred.get("username") or ""
+        password    = cred.get("password") or ""
+        domain      = cred.get("domain") or ""
+        source_host = cred.get("source_host") or "unknown"
         is_domain   = bool(domain)
 
         cred_key = (username.lower(), password, domain.lower())

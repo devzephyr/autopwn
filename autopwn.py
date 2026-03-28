@@ -866,7 +866,7 @@ def _fix_ca_chain(
         warn(f"Could not fix CA chain from VPN server: {exc}")
 
 
-def _connect_vpn(ovpn_path: Path, timeout: int = 30) -> bool:
+def _connect_vpn(ovpn_path: Path, timeout: int = 45) -> bool:
     """
     Start OpenVPN with the downloaded config.  Waits for a tun interface
     to appear (indicating the tunnel is up).  Returns True on success.
@@ -926,25 +926,42 @@ def _connect_vpn(ovpn_path: Path, timeout: int = 30) -> bool:
         err(f"Failed to start OpenVPN: {exc}")
         return False
 
-    # Wait for a tun/tap interface to appear
+    # Wait for a tun/tap interface to appear on Kali
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        time.sleep(2)
+        time.sleep(3)
+        # Check if openvpn is still running
+        if _VPN_PROCESS.poll() is not None:
+            err(f"OpenVPN process exited with code {_VPN_PROCESS.returncode}")
+            break
         try:
-            out = subprocess.check_output(["ip", "link", "show"], text=True, timeout=5)
-            if "tun" in out or "tap" in out:
+            out = subprocess.check_output(
+                ["ip", "-o", "link", "show", "type", "tun"],
+                text=True, timeout=5, stderr=subprocess.DEVNULL,
+            )
+            if out.strip():
                 ok("VPN tunnel established (tun interface detected)")
                 tlog("pivot", "OpenVPN tunnel up", "success")
                 # Give routes a moment to propagate
-                time.sleep(2)
+                time.sleep(3)
                 return True
         except Exception:
-            pass
+            # Fallback: check ip link show for tun/tap
+            try:
+                out2 = subprocess.check_output(["ip", "link", "show"], text=True, timeout=5)
+                for line in out2.splitlines():
+                    if "tun" in line or "tap" in line:
+                        ok("VPN tunnel established (tun/tap interface detected)")
+                        tlog("pivot", "OpenVPN tunnel up", "success")
+                        time.sleep(3)
+                        return True
+            except Exception:
+                pass
 
     err(f"OpenVPN did not establish tunnel within {timeout}s")
-    # Dump the last few lines of the log for debugging
+    # Dump the last 20 lines of the log for debugging
     if log_path.exists():
-        tail = log_path.read_text(errors="replace").splitlines()[-10:]
+        tail = log_path.read_text(errors="replace").splitlines()[-20:]
         for line in tail:
             info(f"  openvpn: {line}")
     tlog("pivot", "OpenVPN tunnel failed", "error")
