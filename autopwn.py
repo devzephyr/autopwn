@@ -788,21 +788,15 @@ def _fix_ca_chain(
     ovpn_path: Path, host: str, username: str, password: str
 ) -> None:
     """
-    Fix TLS issues that prevent a stolen .ovpn config from connecting.
+    Fix incomplete CA chain in a stolen .ovpn config.
 
-    Three common issues with lab/internal VPN setups:
+    The <ca> block often only contains the intermediate CA, but the VPN
+    server's CA file has the full chain (Root CA + Intermediate).
+    SSH into the VPN server, read its CA file, and replace the client's
+    <ca> block so OpenSSL can verify the full chain.
 
-    1. Incomplete CA chain: the <ca> block only has the intermediate CA,
-       but the server sends a full chain including the Root CA.
-    2. OCSP verification script on the server side: `tls-verify` runs an
-       OCSP check that may fail if the responder is down, causing the
-       server to silently reject the client.
-    3. Mismatched client-cert CA: the client cert was signed by a
-       different CA (e.g. Easy-RSA `CN=vpn`) than the Neutron PKI chain
-       the server trusts.  The old CA must be appended to the server's
-       trust file.
-
-    Fix: SSH into the VPN server and remediate all three issues.
+    NOTE: Server-side fixes (OCSP tls-verify, old Easy-RSA CA trust)
+    are applied manually before the demo — see TOPOLOGY.md.
     """
     try:
         import paramiko
@@ -817,108 +811,51 @@ def _fix_ca_chain(
             timeout=10, look_for_keys=False, allow_agent=False,
         )
 
-        # --- Find the server config path ---
-        find_conf_cmd = (
-            "ls /etc/openvpn/server/server.conf /etc/openvpn/server.conf "
-            "/etc/openvpn/*.conf 2>/dev/null | head -1"
+        # Find the server config and extract the CA file path
+        find_cmd = (
+            "cat /etc/openvpn/server/server.conf /etc/openvpn/server.conf "
+            "/etc/openvpn/*.conf 2>/dev/null | grep -E '^\\s*ca\\s+' | head -1"
         )
-        _, stdout, _ = client.exec_command(find_conf_cmd, timeout=10)
-        server_conf = stdout.read().decode(errors="replace").strip()
-        if not server_conf:
-            warn("Could not find OpenVPN server config")
+        _, stdout, _ = client.exec_command(find_cmd, timeout=10)
+        ca_line = stdout.read().decode(errors="replace").strip()
+
+        if not ca_line:
+            warn("Could not find CA directive in VPN server config")
             client.close()
             return
 
-        # --- Read the full server config ---
-        _, stdout, _ = client.exec_command(f"cat {server_conf}", timeout=10)
-        server_config_text = stdout.read().decode(errors="replace")
+        parts = ca_line.split(None, 1)
+        if len(parts) < 2:
+            client.close()
+            return
+        ca_path = parts[1].strip().strip('"').strip("'")
 
-        # --- Issue 1: Disable tls-verify (OCSP) if present ---
-        if re.search(r"^\s*tls-verify\s+", server_config_text, re.MULTILINE):
-            info("Server has tls-verify (OCSP) enabled — disabling it")
-            cmd = f"sudo sed -i 's/^\\s*tls-verify/#tls-verify/' {server_conf}"
-            _, stdout, stderr = client.exec_command(cmd, timeout=10)
-            stdout.read()  # wait for completion
-            server_changed = True
-        else:
-            server_changed = False
+        # Read the server's CA file (full chain)
+        _, stdout, _ = client.exec_command(f"cat {ca_path}", timeout=10)
+        ca_content = stdout.read().decode(errors="replace").strip()
 
-        # --- Issue 2: Extract CA file path from server config ---
-        ca_match = re.search(r"^\s*ca\s+(\S+)", server_config_text, re.MULTILINE)
-        ca_path = ca_match.group(1).strip('"').strip("'") if ca_match else None
-
-        ca_content = ""
-        if ca_path:
-            _, stdout, _ = client.exec_command(f"cat {ca_path}", timeout=10)
-            ca_content = stdout.read().decode(errors="replace").strip()
-            if not ca_content or "BEGIN CERTIFICATE" not in ca_content:
-                _, stdout, _ = client.exec_command(
-                    f"sudo cat {ca_path} 2>/dev/null", timeout=10
-                )
-                ca_content = stdout.read().decode(errors="replace").strip()
-
-        # --- Issue 3: Check if client cert was signed by a different CA ---
-        # Find old/Easy-RSA CA certs on the server
-        find_old_ca_cmd = (
-            "sudo find /etc/openvpn /root /home -name 'ca.crt' -o -name 'ca.pem' "
-            "2>/dev/null | head -5"
-        )
-        _, stdout, _ = client.exec_command(find_old_ca_cmd, timeout=10)
-        old_ca_paths = stdout.read().decode(errors="replace").strip().splitlines()
-
-        for old_ca_path in old_ca_paths:
-            old_ca_path = old_ca_path.strip()
-            if not old_ca_path or old_ca_path == ca_path:
-                continue
+        if not ca_content or "BEGIN CERTIFICATE" not in ca_content:
             _, stdout, _ = client.exec_command(
-                f"sudo cat {old_ca_path}", timeout=10
+                f"sudo cat {ca_path} 2>/dev/null", timeout=10
             )
-            old_ca_content = stdout.read().decode(errors="replace").strip()
-            if not old_ca_content or "BEGIN CERTIFICATE" not in old_ca_content:
-                continue
-
-            # Check if this old CA is already in the server's trust chain
-            if ca_path:
-                _, stdout, _ = client.exec_command(
-                    f"sudo grep -c 'BEGIN CERTIFICATE' {ca_path}", timeout=10
-                )
-                existing = stdout.read().decode(errors="replace").strip()
-                # Append the old CA to the server's trust chain
-                info(f"Appending old CA ({old_ca_path}) to server trust chain")
-                cmd = f"sudo bash -c 'cat {old_ca_path} >> {ca_path}'"
-                _, stdout, stderr = client.exec_command(cmd, timeout=10)
-                stdout.read()
-                server_changed = True
-
-        # --- Restart server if we changed anything ---
-        if server_changed:
-            info("Restarting OpenVPN server to apply changes...")
-            # Try common service names
-            for svc in ("openvpn-server@server", "openvpn@server", "openvpn"):
-                _, stdout, stderr = client.exec_command(
-                    f"sudo systemctl restart {svc} 2>/dev/null", timeout=15
-                )
-                stdout.read()
-                err_out = stderr.read().decode(errors="replace").strip()
-                if "not found" not in err_out and "failed" not in err_out.lower():
-                    ok(f"OpenVPN server restarted ({svc})")
-                    # Give the server a moment to initialize
-                    time.sleep(3)
-                    break
-
-        # --- Fix client-side <ca> block ---
-        if ca_content and "BEGIN CERTIFICATE" in ca_content:
-            ovpn_text = ovpn_path.read_text(errors="replace")
-            ca_block_re = re.compile(r"<ca>.*?</ca>", re.DOTALL)
-            if ca_block_re.search(ovpn_text):
-                new_ca_block = f"<ca>\n{ca_content}\n</ca>"
-                ovpn_text = ca_block_re.sub(new_ca_block, ovpn_text)
-                ovpn_path.write_text(ovpn_text)
-                ok(f"Replaced <ca> block with server's full CA chain from {ca_path}")
-            else:
-                warn("No <ca> block found in .ovpn to replace")
+            ca_content = stdout.read().decode(errors="replace").strip()
 
         client.close()
+
+        if not ca_content or "BEGIN CERTIFICATE" not in ca_content:
+            warn(f"Could not read CA file {ca_path} from VPN server")
+            return
+
+        # Replace the <ca> block in the .ovpn with the server's full CA chain
+        ovpn_text = ovpn_path.read_text(errors="replace")
+        ca_block_re = re.compile(r"<ca>.*?</ca>", re.DOTALL)
+        if ca_block_re.search(ovpn_text):
+            new_ca_block = f"<ca>\n{ca_content}\n</ca>"
+            ovpn_text = ca_block_re.sub(new_ca_block, ovpn_text)
+            ovpn_path.write_text(ovpn_text)
+            ok(f"Replaced <ca> block with server's full CA chain from {ca_path}")
+        else:
+            warn("No <ca> block found in .ovpn to replace")
 
     except Exception as exc:
         warn(f"Could not fix CA chain from VPN server: {exc}")
