@@ -1043,33 +1043,33 @@ def _setup_vpn_masquerade(
         else:
             vpn_pool = "172.16.12.48/28"  # fallback
 
+        # Use sudo -S to pipe the password via stdin (no TTY available)
+        def _sudo(cmd: str) -> tuple[int, str, str]:
+            full = f"echo {password!r} | sudo -S {cmd}"
+            _, so, se = client.exec_command(full, timeout=15)
+            rc = so.channel.recv_exit_status()
+            return rc, so.read().decode(errors="replace"), se.read().decode(errors="replace")
+
         # Check if the rule already exists
-        check_cmd = (
-            f"sudo iptables -t nat -C POSTROUTING "
+        rc, _, _ = _sudo(
+            f"iptables -t nat -C POSTROUTING "
             f"-s {vpn_pool} -o {out_iface} -j MASQUERADE 2>/dev/null"
         )
-        _, stdout, stderr = client.exec_command(check_cmd, timeout=10)
-        rc = stdout.channel.recv_exit_status()
 
         if rc == 0:
             info(f"MASQUERADE rule already exists on {host} for {vpn_pool}")
         else:
-            masq_cmd = (
-                f"sudo iptables -t nat -A POSTROUTING "
+            rc, _, se = _sudo(
+                f"iptables -t nat -A POSTROUTING "
                 f"-s {vpn_pool} -o {out_iface} -j MASQUERADE"
             )
-            _, stdout, stderr = client.exec_command(masq_cmd, timeout=10)
-            rc = stdout.channel.recv_exit_status()
             if rc == 0:
                 ok(f"Added MASQUERADE on {host}: {vpn_pool} -> {out_iface}")
             else:
-                err_msg = stderr.read().decode(errors="replace").strip()
-                warn(f"Failed to add MASQUERADE on {host}: {err_msg}")
+                warn(f"Failed to add MASQUERADE on {host}: {se.strip()}")
 
         # Also ensure ip_forward is enabled (should already be, but just in case)
-        client.exec_command(
-            "sudo sysctl -w net.ipv4.ip_forward=1 2>/dev/null", timeout=10
-        )
+        _sudo("sysctl -w net.ipv4.ip_forward=1")
 
         client.close()
 
