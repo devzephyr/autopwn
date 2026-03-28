@@ -138,10 +138,12 @@ def _extract_domain_from_nse(host_record: dict) -> Optional[str]:
         rootdse = nse.get("ldap-rootdse", "")
         if not rootdse:
             continue
-        # Match DC= components
-        parts = re.findall(r"DC=([^,\s]+)", rootdse, re.IGNORECASE)
-        if parts:
-            return ".".join(parts).lower()
+        # Match DC= components from the FIRST namingContexts entry only
+        nc_match = re.search(r"DC=[^,\s]+(?:,DC=[^,\s]+)*", rootdse, re.IGNORECASE)
+        if nc_match:
+            parts = re.findall(r"DC=([^,\s]+)", nc_match.group(0), re.IGNORECASE)
+            if parts:
+                return ".".join(parts).lower()
     return None
 
 

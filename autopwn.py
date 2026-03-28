@@ -861,9 +861,19 @@ def _connect_vpn(ovpn_path: Path, timeout: int = 45) -> bool:
     """
     global _VPN_PROCESS
 
-    if _VPN_PROCESS is not None and _VPN_PROCESS.poll() is None:
-        warn("OpenVPN process already running — skipping reconnect")
-        return True
+    # Check if a tun interface already exists (tunnel already up).
+    # We cannot rely on _VPN_PROCESS.poll() because --daemon causes the
+    # parent to fork and exit immediately with code 0.
+    try:
+        tun_check = subprocess.check_output(
+            ["ip", "-o", "link", "show", "type", "tun"],
+            text=True, timeout=5, stderr=subprocess.DEVNULL,
+        )
+        if tun_check.strip():
+            warn("VPN tunnel already active (tun interface exists) — skipping reconnect")
+            return True
+    except Exception:
+        pass
 
     info(f"Starting OpenVPN with {ovpn_path}...")
     tlog("pivot", f"Connecting OpenVPN: {ovpn_path}", "attempt")
