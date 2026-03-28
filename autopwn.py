@@ -595,16 +595,6 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
             tun_cidrs.add(str(ipaddress.IPv4Network(m.group(1), strict=False)))
         except ValueError:
             pass
-    # Also filter subnets that contain any tun interface IP
-    for tun_ip in tun_ips:
-        try:
-            ip_obj = ipaddress.IPv4Address(tun_ip)
-            # Check common VPN pool sizes: /28, /27, /24
-            for prefix in (28, 27, 24):
-                net = ipaddress.IPv4Network(f"{tun_ip}/{prefix}", strict=False)
-                tun_cidrs.add(str(net))
-        except ValueError:
-            pass
 
     # Strategy 1+2: extract explicit CIDRs from route/addr output
     for match in cidr_pattern.finditer(route_text):
@@ -656,6 +646,9 @@ def _extract_pivot_subnets(postex_data: dict, known_cidrs: set[str]) -> set[str]
         except ValueError:
             continue
         if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.packed[-1] == 255:
+            continue
+        # Only consider RFC-1918 private IPs (avoid kernel versions like 5.13.0.52)
+        if not ip.is_private:
             continue
         # Skip IPs from tun interfaces (VPN pool addresses)
         if ip_str in tun_ips:
@@ -922,13 +915,12 @@ def _connect_vpn(ovpn_path: Path, timeout: int = 45) -> bool:
         return False
 
     # Wait for a tun/tap interface to appear on Kali
+    # Note: --daemon causes the parent process to fork and exit with code 0
+    # immediately, so we cannot use _VPN_PROCESS.poll() to detect failure.
+    # Instead, just poll for the tun interface and check the log on timeout.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        time.sleep(3)
-        # Check if openvpn is still running
-        if _VPN_PROCESS.poll() is not None:
-            err(f"OpenVPN process exited with code {_VPN_PROCESS.returncode}")
-            break
+        time.sleep(2)
         try:
             out = subprocess.check_output(
                 ["ip", "-o", "link", "show", "type", "tun"],
