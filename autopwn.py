@@ -988,6 +988,95 @@ def _get_new_routes_after_vpn(known_cidrs: set[str]) -> set[str]:
     return new_cidrs
 
 
+def _setup_vpn_masquerade(
+    host: str, username: str, password: str
+) -> None:
+    """
+    SSH into the VPN server and add an iptables MASQUERADE rule so that
+    forwarded VPN-pool traffic is SNAT'd to the server's LAN interface IP.
+
+    Without this, pfSense drops packets from VPN pool IPs (e.g. 172.16.12.54)
+    arriving on the DMZ interface because they fail anti-spoofing checks.
+    With MASQUERADE, forwarded traffic appears to come from the VPN server's
+    own DMZ IP (e.g. 172.16.10.40), which pfSense trusts.
+    """
+    try:
+        import paramiko
+    except ImportError:
+        return
+
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            host, port=22, username=username, password=password,
+            timeout=10, look_for_keys=False, allow_agent=False,
+        )
+
+        # Detect the VPN server's main (non-tun) outbound interface
+        _, stdout, _ = client.exec_command(
+            "ip route get 8.8.8.8 2>/dev/null | head -1", timeout=10
+        )
+        route_line = stdout.read().decode(errors="replace").strip()
+        # Parse: "8.8.8.8 via X.X.X.X dev enp0s3 src X.X.X.X"
+        dev_match = re.search(r"\bdev\s+(\S+)", route_line)
+        out_iface = dev_match.group(1) if dev_match else "enp0s3"
+
+        # Detect the VPN pool subnet from the tun interface
+        _, stdout, _ = client.exec_command(
+            "ip -4 addr show dev tun0 2>/dev/null || ip -4 addr show dev tun1 2>/dev/null",
+            timeout=10,
+        )
+        tun_output = stdout.read().decode(errors="replace")
+        # Parse: "inet 172.16.12.49/28 ..." or "inet 172.16.12.49 peer 172.16.12.50/32"
+        tun_cidr_match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)", tun_output)
+        if tun_cidr_match:
+            tun_ip = tun_cidr_match.group(1)
+            tun_prefix = tun_cidr_match.group(2)
+            try:
+                tun_net = ipaddress.IPv4Network(
+                    f"{tun_ip}/{tun_prefix}", strict=False
+                )
+                vpn_pool = str(tun_net)
+            except ValueError:
+                vpn_pool = "172.16.12.48/28"  # fallback
+        else:
+            vpn_pool = "172.16.12.48/28"  # fallback
+
+        # Check if the rule already exists
+        check_cmd = (
+            f"sudo iptables -t nat -C POSTROUTING "
+            f"-s {vpn_pool} -o {out_iface} -j MASQUERADE 2>/dev/null"
+        )
+        _, stdout, stderr = client.exec_command(check_cmd, timeout=10)
+        rc = stdout.channel.recv_exit_status()
+
+        if rc == 0:
+            info(f"MASQUERADE rule already exists on {host} for {vpn_pool}")
+        else:
+            masq_cmd = (
+                f"sudo iptables -t nat -A POSTROUTING "
+                f"-s {vpn_pool} -o {out_iface} -j MASQUERADE"
+            )
+            _, stdout, stderr = client.exec_command(masq_cmd, timeout=10)
+            rc = stdout.channel.recv_exit_status()
+            if rc == 0:
+                ok(f"Added MASQUERADE on {host}: {vpn_pool} -> {out_iface}")
+            else:
+                err_msg = stderr.read().decode(errors="replace").strip()
+                warn(f"Failed to add MASQUERADE on {host}: {err_msg}")
+
+        # Also ensure ip_forward is enabled (should already be, but just in case)
+        client.exec_command(
+            "sudo sysctl -w net.ipv4.ip_forward=1 2>/dev/null", timeout=10
+        )
+
+        client.close()
+
+    except Exception as exc:
+        warn(f"Could not set up MASQUERADE on VPN server: {exc}")
+
+
 def _attempt_vpn_pivot(
     postex_data: dict, known_cidrs: set[str], dry_run: bool
 ) -> set[str]:
@@ -1022,6 +1111,12 @@ def _attempt_vpn_pivot(
         _fix_ca_chain(local_ovpn, host_ip, username, password)
 
         if _connect_vpn(local_ovpn):
+            # Enable NAT masquerade on the VPN server so forwarded VPN-pool
+            # traffic appears to come from the server's LAN IP.  Without this,
+            # pfSense drops the packets (anti-spoofing: VPN pool IPs arriving
+            # on the DMZ interface are unexpected).
+            _setup_vpn_masquerade(host_ip, username, password)
+
             new_routes = _get_new_routes_after_vpn(known_cidrs)
             if new_routes:
                 return new_routes
